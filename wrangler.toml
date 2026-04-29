@@ -1,8 +1,3 @@
 name = "bep-dashboard"
 main = "worker.js"
 compatibility_date = "2024-01-01"
-
-[vars]
-CLINIKO_API_KEY = "MS0xOTM4NzEyOTY5NjA5MjIyMjk4LW5oZXVTQVYxVTIzRVdVMXdtQUR1NFRiYlMzMHY2SHR0-au2"
-DASHBOARD_EMAIL = "admin@beachsideep.com.au"
-DASHBOARD_PASSWORD = "Theo123*"

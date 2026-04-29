@@ -64,15 +64,12 @@ export default {
       const pracCache = {};
 
       while (hasMore && page <= 20) {
-        const data = await clinikoGet(`appointments?sort=starts_at&order=asc&per_page=100&page=${page}`);
+        // Use starts_at filters in the URL directly
+        const path = `appointments?sort=starts_at&order=asc&per_page=100&page=${page}&q[]=starts_at>=${from}T00:00:00Z&q[]=starts_at<=${to}T23:59:59Z`;
+        const data = await clinikoGet(path);
         const appts = data.appointments || [];
-        const filtered = appts.filter(a => {
-          const d = a.starts_at?.slice(0,10);
-          return d >= from && d <= to;
-        });
-        allAppts = allAppts.concat(filtered);
-        const last = appts[appts.length - 1];
-        hasMore = !!data.links?.next && appts.length === 100 && (!last || last.starts_at?.slice(0,10) <= to);
+        allAppts = allAppts.concat(appts);
+        hasMore = !!data.links?.next && appts.length === 100;
         page++;
       }
 

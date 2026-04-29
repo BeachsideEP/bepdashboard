@@ -14,7 +14,7 @@ export default {
       return new Response('', { headers: corsHeaders });
     }
 
-    if (url.pathname === '/debug') {
+    if (url.searchParams.get('debug') === 'true') {
       const API_KEY2 = 'MS0xOTM4NzEyOTY5NjA5MjIyMjk4LW5oZXVTQVYxVTIzRVdVMXdtQUR1NFRiYlMzMHY2SHR0-au2';
       const creds2 = btoa(API_KEY2 + ':');
       const res = await fetch(`${CLINIKO_BASE}/appointments?per_page=5&page=1`, {

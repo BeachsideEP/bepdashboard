@@ -15,10 +15,14 @@ export default {
     }
 
     // ── AUTH ──────────────────────────────────────────
+    const DASH_EMAIL = env.DASHBOARD_EMAIL || 'admin@beachsideep.com.au';
+    const DASH_PASSWORD = env.DASHBOARD_PASSWORD || 'Theo123*';
+    const CLINIKO_KEY = env.CLINIKO_API_KEY || 'MS0xOTM4NzEyOTY5NjA5MjIyMjk4LW5oZXVTQVYxVTIzRVdVMXdtQUR1NFRiYlMzMHY2SHR0-au2';
+
     if (url.pathname === '/auth/login') {
       const body = await request.json();
-      if (body.email === env.DASHBOARD_EMAIL && body.password === env.DASHBOARD_PASSWORD) {
-        const token = btoa(env.DASHBOARD_EMAIL + ':' + Date.now());
+      if (body.email === DASH_EMAIL && body.password === DASH_PASSWORD) {
+        const token = btoa(DASH_EMAIL + ':' + Date.now());
         return new Response(JSON.stringify({ token }), { headers: corsHeaders });
       }
       return new Response(JSON.stringify({ error: 'Invalid credentials' }), { status: 401, headers: corsHeaders });
@@ -32,13 +36,13 @@ export default {
     }
     try {
       const decoded = atob(token);
-      if (!decoded.startsWith(env.DASHBOARD_EMAIL)) throw new Error('Invalid token');
+      if (!decoded.startsWith(DASH_EMAIL)) throw new Error('Invalid token');
     } catch(e) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: corsHeaders });
     }
 
     // ── CLINIKO API ───────────────────────────────────
-    const API_KEY = env.CLINIKO_API_KEY;
+    const API_KEY = CLINIKO_KEY;
     const creds = btoa(API_KEY + ':');
     const authHeaders = {
       'Authorization': 'Basic ' + creds,

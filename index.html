@@ -470,17 +470,28 @@ async function loadDashboard() {
   const fromStr = fmtDate(dateFrom), toStr = fmtDate(dateTo);
 
   try {
+    showLoading('Fetching practitioners...');
+    const pracData = await apiGet('get_practitioners');
+    const pracLookup = pracData.practitioners || {};
+
     showLoading('Fetching appointments...');
     const apptData = await apiGet('get_appointments_range', { from: fromStr, to: toStr });
-    allAppointments = apptData.appointments || [];
+    // Enrich appointments with practitioner names from lookup
+    allAppointments = (apptData.appointments || []).map(a => {
+      const pracId = a.practitioner?.links?.self?.split('/').pop();
+      return { ...a, practitioner_name: pracId ? (pracLookup[pracId] || 'Unknown') : 'Unknown' };
+    });
 
     showLoading('Fetching new patients...');
     const patientData = await apiGet('get_new_patients', { from: fromStr, to: toStr });
     allNewPatients = patientData.patients || [];
 
-    showLoading('Fetching invoices...');
+    showLoading('Fetching invoices (all time for quarter)...');
     const invoiceData = await apiGet('get_invoices_range', { from: fromStr, to: toStr });
-    allInvoices = invoiceData.invoices || [];
+    allInvoices = (invoiceData.invoices || []).map(inv => {
+      // Try to match invoice to appointment for practitioner
+      return inv;
+    });
 
     showLoading('Building dashboard...');
     processAll(allAppointments, allNewPatients, allInvoices, fromStr, toStr);

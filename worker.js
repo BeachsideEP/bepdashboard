@@ -57,24 +57,18 @@ export default {
       return res.json();
     }
 
-    // Cache for practitioner names
-    const pracCache = {};
-    async function getPracName(links) {
-      if (!links?.self) return 'Unknown';
-      const pracId = links.self.split('/').pop();
-      if (!pracCache[pracId]) {
-        try {
-          const prac = await clinikoGet(`practitioners/${pracId}`);
-          pracCache[pracId] = `${prac.first_name} ${prac.last_name}`;
-        } catch(e) { pracCache[pracId] = 'Unknown'; }
-      }
-      return pracCache[pracId];
-    }
-
     const action = url.searchParams.get('action') || '';
 
+    // ── GET ALL PRACTITIONERS (cached lookup) ─────────
+    if (action === 'get_practitioners') {
+      const data = await clinikoGet('practitioners?per_page=100');
+      const practitioners = data.practitioners || [];
+      const lookup = {};
+      practitioners.forEach(p => { lookup[p.id] = `${p.first_name} ${p.last_name}`; });
+      return new Response(JSON.stringify({ practitioners: lookup }), { headers: corsHeaders });
+
     // ── GET APPOINTMENTS IN DATE RANGE ────────────────
-    if (action === 'get_appointments_range') {
+    } else if (action === 'get_appointments_range') {
       const from = url.searchParams.get('from') || '';
       const to = url.searchParams.get('to') || '';
 
@@ -90,22 +84,22 @@ export default {
       for (let page = startPage; page >= endPage; page--) {
         const data = await clinikoGet(`appointments?sort=starts_at&order=asc&per_page=100&page=${page}`);
         const appts = data.appointments || [];
+
+        // Include in-range AND cancelled appointments (cancelled_at may be outside range but appt was in range)
         const inRange = appts.filter(a => {
-          const d = a.starts_at?.slice(0,10);
-          return d >= from && d <= to;
+          const apptDate = a.starts_at?.slice(0,10);
+          const cancelDate = a.cancelled_at?.slice(0,10);
+          // Include if appointment was in range OR was cancelled and the original appt was in range
+          return (apptDate >= from && apptDate <= to) ||
+                 (cancelDate >= from && cancelDate <= to && apptDate >= from);
         });
+
         allAppts = allAppts.concat(inRange);
         const firstAppt = appts[0];
         if (firstAppt && firstAppt.starts_at?.slice(0,10) < from) break;
       }
 
-      // Enrich with practitioner names
-      const enriched = await Promise.all(allAppts.map(async (a) => {
-        const pracName = await getPracName(a.practitioner?.links);
-        return { ...a, practitioner_name: pracName };
-      }));
-
-      return new Response(JSON.stringify({ appointments: enriched }), { headers: corsHeaders });
+      return new Response(JSON.stringify({ appointments: allAppts }), { headers: corsHeaders });
 
     // ── GET NEW PATIENTS IN DATE RANGE ───────────────
     } else if (action === 'get_new_patients') {
@@ -131,7 +125,7 @@ export default {
 
       return new Response(JSON.stringify({ patients: allPatients }), { headers: corsHeaders });
 
-    // ── GET INVOICES IN DATE RANGE ───────────────────
+    // ── GET ALL INVOICES ─────────────────────────────
     } else if (action === 'get_invoices_range') {
       const from = url.searchParams.get('from') || '';
       const to = url.searchParams.get('to') || '';
@@ -140,7 +134,8 @@ export default {
       let page = 1;
       let hasMore = true;
 
-      while (hasMore && page <= 20) {
+      // Fetch all invoices sorted newest first
+      while (hasMore && page <= 50) {
         const data = await clinikoGet(`invoices?sort=created_at&order=desc&per_page=100&page=${page}`);
         const invoices = data.invoices || [];
         const filtered = invoices.filter(i => {
@@ -149,45 +144,12 @@ export default {
         });
         allInvoices = allInvoices.concat(filtered);
         const last = invoices[invoices.length - 1];
+        // Stop if we've gone past the start date
         hasMore = !!data.links?.next && invoices.length === 100 && (!last || last.created_at?.slice(0,10) >= from);
         page++;
       }
 
       return new Response(JSON.stringify({ invoices: allInvoices }), { headers: corsHeaders });
-
-    // ── GET UPCOMING APPOINTMENTS ────────────────────
-    } else if (action === 'get_upcoming') {
-      const today = url.searchParams.get('today') || new Date().toISOString().slice(0,10);
-      const futureDate = new Date();
-      futureDate.setDate(futureDate.getDate() + 60);
-      const future = futureDate.toISOString().slice(0,10);
-
-      // Get total appointments to find last pages for upcoming
-      const countData = await clinikoGet(`appointments?per_page=1&page=1`);
-      const total = countData.total_entries || 0;
-      const totalPages = Math.ceil(total / 100);
-
-      let upcoming = [];
-      // Fetch last few pages for upcoming appointments
-      for (let page = totalPages; page >= Math.max(1, totalPages - 5); page--) {
-        const data = await clinikoGet(`appointments?sort=starts_at&order=asc&per_page=100&page=${page}`);
-        const appts = data.appointments || [];
-        const inRange = appts.filter(a => {
-          const d = a.starts_at?.slice(0,10);
-          return d >= today && d <= future && !a.cancelled_at;
-        });
-        upcoming = upcoming.concat(inRange);
-      }
-
-      // Get unique patient IDs with upcoming appointments
-      const patientsWithUpcoming = new Set(
-        upcoming.map(a => a.patient?.links?.self?.split('/').pop()).filter(Boolean)
-      );
-
-      return new Response(JSON.stringify({
-        upcoming_count: upcoming.length,
-        patient_ids_with_upcoming: [...patientsWithUpcoming]
-      }), { headers: corsHeaders });
 
     } else {
       return new Response(JSON.stringify({ error: 'Unknown action' }), { status: 400, headers: corsHeaders });

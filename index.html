@@ -508,22 +508,36 @@
     }
   }
 
+  function isAttended(a) {
+    // Attended = did_not_arrive is false AND treatment note has been written
+    return !a.did_not_arrive && a.treatment_note_status > 0;
+  }
+  function isDNA(a) {
+    return a.did_not_arrive === true;
+  }
+  function isPending(a) {
+    return !a.did_not_arrive && (a.treatment_note_status === 0 || a.treatment_note_status === null);
+  }
+
   function processData(appointments, newPatients, fromStr, toStr) {
     const appts = appointments.filter(a => { const d = a.starts_at?.slice(0,10); return d >= fromStr && d <= toStr; });
     const total = appts.length;
-    const attended = appts.filter(a => a.patient_arrived).length;
-    const dna = appts.filter(a => a.did_not_arrive).length;
-    const rate = total > 0 ? Math.round((attended / total) * 100) : 0;
+    const attended = appts.filter(isAttended).length;
+    const dna = appts.filter(isDNA).length;
+    const pending = appts.filter(isPending).length;
+    // Attendance rate calculated only on completed appointments (exclude pending/future)
+    const completed = attended + dna;
+    const rate = completed > 0 ? Math.round((attended / completed) * 100) : 0;
 
     document.getElementById('stat-total').textContent = total;
     document.getElementById('stat-attendance').textContent = rate + '%';
-    document.getElementById('stat-attendance-sub').textContent = `${attended} attended of ${total}`;
+    document.getElementById('stat-attendance-sub').textContent = `${attended} attended of ${completed} completed`;
     document.getElementById('stat-dna').textContent = dna;
-    document.getElementById('stat-dna-sub').textContent = `${dna} missed appointment${dna !== 1 ? 's' : ''}`;
+    document.getElementById('stat-dna-sub').textContent = `${dna} missed · ${pending} pending`;
     document.getElementById('stat-new').textContent = newPatients.length;
 
     buildApptsChart(appts, fromStr, toStr);
-    buildDnaChart(attended, dna, total - attended - dna);
+    buildDnaChart(attended, dna, pending);
     buildPracTable(appts, newPatients);
     buildReferralList(newPatients);
     buildDnaList(appts);
@@ -533,10 +547,14 @@
     const days = {};
     let d = new Date(fromStr + 'T00:00:00');
     const end = new Date(toStr + 'T00:00:00');
-    while (d <= end) { days[fmtDate(d)] = {attended:0, dna:0}; d.setDate(d.getDate()+1); }
+    while (d <= end) { days[fmtDate(d)] = {attended:0, dna:0, pending:0}; d.setDate(d.getDate()+1); }
     appts.forEach(a => {
       const day = a.starts_at?.slice(0,10);
-      if (days[day]) { if (a.patient_arrived) days[day].attended++; else if (a.did_not_arrive) days[day].dna++; else days[day].attended++; }
+      if (days[day]) {
+        if (isAttended(a)) days[day].attended++;
+        else if (isDNA(a)) days[day].dna++;
+        else days[day].pending++;
+      }
     });
     const labels = Object.keys(days).map(d => new Date(d+'T00:00:00').toLocaleDateString('en-AU',{day:'numeric',month:'short'}));
     if (chartAppts) chartAppts.destroy();
@@ -554,7 +572,7 @@
     if (chartDna) chartDna.destroy();
     chartDna = new Chart(document.getElementById('chart-dna'), {
       type: 'doughnut',
-      data: { labels:['Attended','DNA','Other'], datasets:[{ data:[attended, dna, Math.max(0,other)], backgroundColor:['rgba(135,206,235,0.8)','rgba(248,113,113,0.7)','rgba(100,100,100,0.4)'], borderWidth:0 }]},
+      data: { labels:['Attended','DNA','Pending'], datasets:[{ data:[attended, dna, Math.max(0,other)], backgroundColor:['rgba(135,206,235,0.8)','rgba(248,113,113,0.7)','rgba(100,100,100,0.4)'], borderWidth:0 }]},
       options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom',labels:{color:'#888',font:{family:'DM Sans',size:11},padding:12}}}, cutout:'65%' }
     });
   }
@@ -563,16 +581,32 @@
     const pracs = {};
     appts.forEach(a => {
       const name = a.practitioner_name || 'Unknown';
-      if (!pracs[name]) pracs[name] = {total:0, attended:0, dna:0};
+      if (!pracs[name]) pracs[name] = {total:0, attended:0, dna:0, pending:0};
       pracs[name].total++;
-      if (a.patient_arrived) pracs[name].attended++;
-      if (a.did_not_arrive) pracs[name].dna++;
+      if (isAttended(a)) pracs[name].attended++;
+      else if (isDNA(a)) pracs[name].dna++;
+      else pracs[name].pending++;
     });
+
+    // Count new patients per practitioner from their appointments
+    const newPtIds = new Set(newPatients.map(p => p.id));
+    appts.forEach(a => {
+      const patId = a.patient?.links?.self?.split('/').pop();
+      if (patId && newPtIds.has(patId)) {
+        const name = a.practitioner_name || 'Unknown';
+        if (pracs[name]) {
+          pracs[name].newPts = (pracs[name].newPts || 0) + 1;
+          newPtIds.delete(patId); // count each patient once
+        }
+      }
+    });
+
     const maxTotal = Math.max(...Object.values(pracs).map(p=>p.total), 1);
     const tbody = document.getElementById('prac-table-body');
     if (!Object.keys(pracs).length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No data</td></tr>'; return; }
     tbody.innerHTML = Object.entries(pracs).sort((a,b)=>b[1].total-a[1].total).map(([name, d]) => {
-      const rate = d.total > 0 ? Math.round((d.attended/d.total)*100) : 0;
+      const completed = d.attended + d.dna;
+      const rate = completed > 0 ? Math.round((d.attended/completed)*100) : 0;
       const barPct = Math.round((d.total/maxTotal)*100);
       const rateColor = rate >= 85 ? 'var(--success)' : rate >= 70 ? 'var(--warning)' : 'var(--danger)';
       return `<tr>
@@ -580,8 +614,8 @@
         <td><div class="bar-cell"><span class="mono">${d.total}</span><div class="bar-track"><div class="bar-fill" style="width:${barPct}%"></div></div></div></td>
         <td class="mono">${d.attended}</td>
         <td class="mono" style="color:var(--danger)">${d.dna}</td>
-        <td><span style="color:${rateColor};font-family:'DM Mono',monospace">${rate}%</span></td>
-        <td class="mono" style="color:var(--success)">—</td>
+        <td><span style="color:${rateColor};font-family:'DM Mono',monospace">${completed > 0 ? rate+'%' : '—'}</span></td>
+        <td class="mono" style="color:var(--success)">${d.newPts || 0}</td>
       </tr>`;
     }).join('');
     buildPracChart(pracs);

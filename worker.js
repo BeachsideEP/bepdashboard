@@ -75,28 +75,35 @@ export default {
       const from = url.searchParams.get('from') || '';
       const to = url.searchParams.get('to') || '';
 
+      // First get total count to know how many pages there are
+      const firstPage = await clinikoGet(`appointments?sort=starts_at&order=asc&per_page=100&page=1`);
+      const total = firstPage.total_entries || 0;
+      const totalPages = Math.ceil(total / 100);
+
       let allAppts = [];
-      let page = 1;
-      let hasMore = true;
       const pracCache = {};
 
-      while (hasMore && page <= 20) {
+      // Start from last pages and work backwards until we're past our start date
+      for (let page = totalPages; page >= 1; page--) {
         const data = await clinikoGet(`appointments?sort=starts_at&order=asc&per_page=100&page=${page}`);
         const appts = data.appointments || [];
-        // Filter to date range
-        const filtered = appts.filter(a => {
+
+        const inRange = appts.filter(a => {
           const d = a.starts_at?.slice(0,10);
           return d >= from && d <= to;
         });
-        allAppts = allAppts.concat(filtered);
-        // Stop paginating if we've gone past the end date
-        const last = appts[appts.length - 1];
-        hasMore = !!data.links?.next && appts.length === 100;
-        // If all appointments on this page are after our end date, stop
-        if (last && last.starts_at?.slice(0,10) > to) hasMore = false;
-        page++;
+
+        allAppts = allAppts.concat(inRange);
+
+        // If the first appointment on this page is before our start date, we're done
+        const firstAppt = appts[0];
+        if (firstAppt && firstAppt.starts_at?.slice(0,10) < from) break;
+
+        // Safety limit — max 10 pages
+        if (totalPages - page >= 10) break;
       }
 
+      // Enrich with practitioner names
       const enriched = await Promise.all(allAppts.map(async (a) => {
         let pracName = 'Unknown';
         if (a.practitioner?.links?.self) {

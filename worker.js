@@ -75,16 +75,19 @@ export default {
       const from = url.searchParams.get('from') || '';
       const to = url.searchParams.get('to') || '';
 
-      // First get total count to know how many pages there are
-      const firstPage = await clinikoGet(`appointments?sort=starts_at&order=asc&per_page=100&page=1`);
-      const total = firstPage.total_entries || 0;
-      const totalPages = Math.ceil(total / 100);
-
       let allAppts = [];
       const pracCache = {};
 
-      // Start from last pages and work backwards until we're past our start date
-      for (let page = totalPages; page >= 1; page--) {
+      // Get total count first
+      const countData = await clinikoGet(`appointments?per_page=1&page=1`);
+      const total = countData.total_entries || 0;
+      const totalPages = Math.ceil(total / 100);
+
+      // Start from last page and work backwards, max 15 pages
+      const startPage = Math.max(1, totalPages);
+      const endPage = Math.max(1, totalPages - 15);
+
+      for (let page = startPage; page >= endPage; page--) {
         const data = await clinikoGet(`appointments?sort=starts_at&order=asc&per_page=100&page=${page}`);
         const appts = data.appointments || [];
 
@@ -95,12 +98,9 @@ export default {
 
         allAppts = allAppts.concat(inRange);
 
-        // If the first appointment on this page is before our start date, we're done
+        // If the last appointment on this page is before our start date, stop
         const firstAppt = appts[0];
         if (firstAppt && firstAppt.starts_at?.slice(0,10) < from) break;
-
-        // Safety limit — max 10 pages
-        if (totalPages - page >= 10) break;
       }
 
       // Enrich with practitioner names
@@ -119,7 +119,7 @@ export default {
         return { ...a, practitioner_name: pracName };
       }));
 
-      return new Response(JSON.stringify({ appointments: enriched }), { headers: corsHeaders });
+      return new Response(JSON.stringify({ appointments: enriched, debug: { total, totalPages, startPage, endPage } }), { headers: corsHeaders });
 
     } else if (action === 'get_new_patients') {
       const from = url.searchParams.get('from') || '';

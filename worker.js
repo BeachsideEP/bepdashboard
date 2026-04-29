@@ -58,6 +58,11 @@ export default {
 
     const action = url.searchParams.get('action') || '';
 
+    if (action === 'debug_appointments') {
+      const data = await clinikoGet('appointments?per_page=5&page=1');
+      return new Response(JSON.stringify(data), { headers: corsHeaders });
+    }
+
     if (action === 'get_appointments_range') {
       const from = url.searchParams.get('from') || '';
       const to = url.searchParams.get('to') || '';

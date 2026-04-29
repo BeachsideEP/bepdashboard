@@ -14,7 +14,15 @@ export default {
       return new Response('', { headers: corsHeaders });
     }
 
-    // ── AUTH ──────────────────────────────────────────
+    if (url.pathname === '/debug') {
+      const API_KEY2 = 'MS0xOTM4NzEyOTY5NjA5MjIyMjk4LW5oZXVTQVYxVTIzRVdVMXdtQUR1NFRiYlMzMHY2SHR0-au2';
+      const creds2 = btoa(API_KEY2 + ':');
+      const res = await fetch(`${CLINIKO_BASE}/appointments?per_page=5&page=1`, {
+        headers: { 'Authorization': 'Basic ' + creds2, 'Accept': 'application/json', 'User-Agent': 'BEP-Dashboard/1.0 (admin@beachsideep.com.au)' }
+      });
+      const data = await res.text();
+      return new Response(data, { headers: corsHeaders });
+    }
     const DASH_EMAIL = env.DASHBOARD_EMAIL || 'admin@beachsideep.com.au';
     const DASH_PASSWORD = env.DASHBOARD_PASSWORD || 'Theo123*';
     const CLINIKO_KEY = env.CLINIKO_API_KEY || 'MS0xOTM4NzEyOTY5NjA5MjIyMjk4LW5oZXVTQVYxVTIzRVdVMXdtQUR1NFRiYlMzMHY2SHR0-au2';

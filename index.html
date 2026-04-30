@@ -663,16 +663,22 @@ async function loadDashboard() {
     else console.warn('⚠️ No cancelled_at found — worker may be filtering cancelled appts out');
     console.groupEnd();
 
-    const extractPatId = (a) =>
-      a.patient?.id ? String(a.patient.id) : (a.patient?.links?.self?.split('/').pop() || null);
+    const extractPatId = (a) => {
+      // Patient ID lives in links.self on the appointment's links object
+      const selfLink = a.links?.patient || a.patient?.links?.self || '';
+      const fromLink = selfLink.split('/').pop() || null;
+      return fromLink;
+    };
 
-    const enrich = (a, overrideCancelledAt) => {
+    const enrich = (a) => {
       const pracId = a.practitioner?.links?.self?.split('/').pop();
       const pracName = pracId ? (pracLookup[pracId] || null) : null;
-      const patientName = [a.patient?.first_name, a.patient?.last_name].filter(Boolean).join(' ') || null;
+      // patient_name is a direct field on the appointment in this worker
+      const patientName = a.patient_name || null;
       const patId = extractPatId(a);
-      const apptTypeName = a.appointment_type?.name || null;
-      const cancelled_at = overrideCancelledAt || a.cancelled_at || null;
+      const apptTypeName = a.appointment_type_name || a.appointment_type?.name || null;
+      // cancellation_time is the real field; cancelled_at may be null even when cancelled
+      const cancelled_at = a.cancelled_at || a.cancellation_time || null;
       return { ...a, cancelled_at, practitioner_name: pracName, patient_name: patientName, _patId: patId, appointment_type_name: apptTypeName };
     };
 
@@ -682,7 +688,7 @@ async function loadDashboard() {
     // Future appointments keyed by patient ID for rebooking
     const futureByPatient = {};
     rawFuture.forEach(a => {
-      if (a.cancelled_at) return;
+      if (a.cancelled_at || a.cancellation_time) return;
       const patId = extractPatId(a);
       if (!patId) return;
       if (!futureByPatient[patId]) futureByPatient[patId] = [];
@@ -690,13 +696,16 @@ async function loadDashboard() {
     });
     window._futureByPatient = futureByPatient;
 
-    // New patients: use the API — it returns patients whose first appointment is in range
-    // Cross-filter: only count patients who actually have an appointment this period
+    // New patients: use the API result, cross-filter to those with an appointment this period
     showLoading('Fetching new patients...');
     const patientData = await apiGet('get_new_patients', { from: fromStr, to: toStr });
     const apiNewPatients = patientData.patients || [];
     const periodPatientIds = new Set(allAppointments.filter(a => !isCancelled(a)).map(a => a._patId).filter(Boolean));
-    // Filter API new patients to only those with an appointment in this period
+    // Debug: compare ID formats
+    const sampleApptLink = allAppointments[0]?.links;
+    const samplePatId = allAppointments[0]?._patId;
+    const sampleNewPatId = apiNewPatients[0]?.id;
+    console.log(`🔍 New patients: API=${apiNewPatients.length} | period patient IDs: ${periodPatientIds.size} | sample appt links:`, sampleApptLink, `| sample _patId: "${samplePatId}" | sample new patient id: "${sampleNewPatId}"`);
     allNewPatients = apiNewPatients
       .filter(p => {
         const pid = p.id ? String(p.id) : null;
@@ -708,7 +717,7 @@ async function loadDashboard() {
         full_name: [p.first_name, p.last_name].filter(Boolean).join(' '),
         referral_source: p.referral_source || p.referred_by || null,
       }));
-    console.log(`🔍 New patients: API=${apiNewPatients.length}, with appts this period=${allNewPatients.length}, Cliniko target=5`);
+    console.log(`🔍 New patients after cross-filter: ${allNewPatients.length} (Cliniko shows 5)`);
 
     showLoading('Fetching invoices...');
     const invoiceData = await apiGet('get_invoices_range', { from: fromStr, to: toStr });
@@ -733,20 +742,20 @@ async function loadDashboard() {
 }
 
 // ── ATTENDANCE HELPERS ────────────────────────────
-// Cliniko: group/class appointments have appointment_type.max_attendees > 1
-// or they may have patient_count > 1 on the appointment itself
+// Cliniko: group/class appointments have attendees array or max_attendees > 1
 function isGroup(a) {
-  return (a.appointment_type?.max_attendees > 1) || (a.max_attendees > 1) || false;
+  return (a.appointment_type?.max_attendees > 1) || (a.max_attendees > 1)
+      || (Array.isArray(a.attendees) && a.attendees.length > 0) || false;
 }
-// Attended: not DNA, not cancelled, AND (has a note started OR is a group/class appointment)
+// Attended: not DNA, not cancelled, AND patient arrived OR has note OR is a class
 function isAttended(a) {
-  if (a.did_not_arrive || a.cancelled_at) return false;
-  return a.treatment_note_status > 0 || isGroup(a);
+  if (a.did_not_arrive || a.cancelled_at || a.cancellation_time) return false;
+  return a.patient_arrived === true || a.treatment_note_status > 0 || isGroup(a);
 }
-// DNA: explicitly marked did_not_arrive and not cancelled
-function isDNA(a) { return a.did_not_arrive === true && !a.cancelled_at; }
-// Cancelled: has a cancelled_at timestamp (patient or admin cancelled)
-function isCancelled(a) { return !!a.cancelled_at; }
+// DNA: explicitly marked did_not_arrive
+function isDNA(a) { return a.did_not_arrive === true && !a.cancelled_at && !a.cancellation_time; }
+// Cancelled: has cancellation_time OR cancelled_at
+function isCancelled(a) { return !!(a.cancelled_at || a.cancellation_time); }
 // No more "pending" — every non-cancelled appt either attended or DNA
 
 // ── PROCESS ALL DATA ──────────────────────────────
@@ -856,7 +865,7 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
     banner.style.display = cancelled.length === 0 ? 'block' : 'none';
     if (cancelled.length === 0) {
       const sampleActive = appts[0];
-      banner.textContent = `⚠ Cancellation debug: 0 cancelled appts found.\nTotal appts received: ${appts.length}\nSample appt keys: ${sampleActive ? Object.keys(sampleActive).join(', ') : 'none'}\ncancelled_at on sample: ${sampleActive?.cancelled_at ?? 'field missing'}\ndid_not_arrive on sample: ${sampleActive?.did_not_arrive ?? 'field missing'}`;
+      banner.textContent = `⚠ Cancellation debug: 0 cancelled appts found.\nTotal appts: ${appts.length} | Sample keys: ${sampleActive ? Object.keys(sampleActive).join(', ') : 'none'}\ncancelled_at: "${sampleActive?.cancelled_at ?? 'missing'}" | cancellation_time: "${sampleActive?.cancellation_time ?? 'missing'}"\npatient_arrived: ${sampleActive?.patient_arrived} | did_not_arrive: ${sampleActive?.did_not_arrive}\nlinks: ${JSON.stringify(sampleActive?.links ?? {})}`;
     }
   }
 }

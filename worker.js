@@ -2,7 +2,6 @@ const CLINIKO_BASE = 'https://api.au2.cliniko.com/v1';
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -13,6 +12,20 @@ export default {
     if (request.method === 'OPTIONS') {
       return new Response('', { headers: corsHeaders });
     }
+
+    try {
+      return await handleRequest(request, env, corsHeaders);
+    } catch (e) {
+      return new Response(JSON.stringify({ error: e.message || 'Internal error' }), {
+        status: 500,
+        headers: corsHeaders,
+      });
+    }
+  }
+};
+
+async function handleRequest(request, env, corsHeaders) {
+    const url = new URL(request.url);
 
     const DASH_EMAIL = env.DASHBOARD_EMAIL || 'admin@beachsideep.com.au';
     const DASH_PASSWORD = env.DASHBOARD_PASSWORD || 'Theo123*';
@@ -154,5 +167,4 @@ export default {
     } else {
       return new Response(JSON.stringify({ error: 'Unknown action' }), { status: 400, headers: corsHeaders });
     }
-  }
-};
+}

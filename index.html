@@ -244,10 +244,6 @@
         <svg viewBox="0 0 24 24"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
         Classes
       </div>
-      <div class="nav-item" onclick="switchTab('referrals', this)">
-        <svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
-        Referrals
-      </div>
     </div>
     <div class="sidebar-footer">
       <div style="font-size:11px; color:var(--muted); margin-bottom:10px;" id="last-updated">Not yet loaded</div>
@@ -519,47 +515,6 @@
         </div>
       </div>
 
-      <!-- REFERRAL ENGINE TAB -->
-      <div class="tab-content" id="tab-referrals">
-        <div class="section-header">Referral Engine</div>
-
-        <div class="stat-grid-3" style="margin-bottom:24px;">
-          <div class="stat-card"><div class="stat-label">Total New Patients</div><div class="stat-value c-sky" id="ref-total">—</div><div class="stat-sub">in selected period</div></div>
-          <div class="stat-card"><div class="stat-label">Referral Sources</div><div class="stat-value c-success" id="ref-sources">—</div><div class="stat-sub">distinct sources</div></div>
-          <div class="stat-card"><div class="stat-label">Top Source</div><div class="stat-value c-sky" id="ref-top" style="font-size:18px;line-height:1.2;">—</div><div class="stat-sub" id="ref-top-sub"></div></div>
-        </div>
-
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:24px;">
-          <div class="chart-card">
-            <div class="chart-header"><div><div class="chart-title">Referral Sources</div><div class="chart-sub">New patients by source</div></div></div>
-            <div style="height:260px;"><canvas id="chart-referral-sources"></canvas></div>
-          </div>
-          <div class="chart-card">
-            <div class="chart-header"><div><div class="chart-title">Referral Trend</div><div class="chart-sub">New patients over time</div></div></div>
-            <div style="height:260px;"><canvas id="chart-referral-trend"></canvas></div>
-          </div>
-        </div>
-
-        <div class="table-card" style="margin-bottom:20px;">
-          <div class="table-header"><div class="table-title">Source Breakdown</div></div>
-          <table>
-            <thead><tr><th>Source</th><th>New Patients</th><th>% of Total</th><th>Est. Lifetime Value</th></tr></thead>
-            <tbody id="ref-source-table"><tr><td colspan="4" class="empty">Load data to view</td></tr></tbody>
-          </table>
-        </div>
-
-        <div class="table-card">
-          <div class="table-header">
-            <div class="table-title">New Patient List</div>
-            <div style="font-size:12px;color:var(--muted);">Showing new patients this period with their referral source</div>
-          </div>
-          <table>
-            <thead><tr><th>Patient</th><th>Practitioner</th><th>Referral Source</th><th>First Appointment</th></tr></thead>
-            <tbody id="ref-patient-table"><tr><td colspan="4" class="empty">Load data to view</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-
     </div>
   </main>
 </div>
@@ -574,7 +529,7 @@ let chartAppts = null, chartDna = null, chartPrac = null, chartRevenue = null;
 let allAppointments = [], allNewPatients = [], allInvoices = [];
 
 // ── TAB SWITCHING ──────────────────────────────────
-const TAB_TITLES = { overview: 'Overview', practitioners: 'Practitioners', cancellations: 'Cancellations', revenue: 'Revenue', actions: 'Action Centre', timelost: 'Time Lost', team: 'Team', classes: 'Classes', referrals: 'Referral Engine' };
+const TAB_TITLES = { overview: 'Overview', practitioners: 'Practitioners', cancellations: 'Cancellations', revenue: 'Revenue', actions: 'Action Centre', timelost: 'Time Lost', team: 'Team', classes: 'Classes' };
 function switchTab(name, el) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -696,7 +651,7 @@ async function loadDashboard() {
     // Debug — open browser console to see this
     console.group('🔍 BEP Raw API');
     console.log('Period appts:', rawAppts.length, '| Future appts:', rawFuture.length);
-    console.log('apptData ALL keys + values:', JSON.stringify(Object.fromEntries(Object.entries(apptData).filter(([k]) => k !== 'appointments'))));
+    console.log('apptData top-level keys:', Object.keys(apptData));
     if (rawAppts[0]) {
       console.log('Sample appt keys:', Object.keys(rawAppts[0]));
       console.log('Sample appt:', rawAppts[0]);
@@ -708,51 +663,76 @@ async function loadDashboard() {
     else console.warn('⚠️ No cancelled_at found — worker may be filtering cancelled appts out');
     console.groupEnd();
 
-    // patient_name is a direct field — use it as the patient key for matching
-    // (links.self is the appointment URL only, no patient ID available from this worker)
-    const enrich = (a) => {
-      const pracId = a.practitioner?.links?.self?.split('/').pop();
-      const pracName = pracId ? (pracLookup[pracId] || null) : null;
-      const patientName = a.patient_name || null;
-      // Use normalised patient name as the patient key (best available)
-      const _patKey = patientName ? patientName.trim().toLowerCase() : null;
-      const apptTypeName = a.appointment_type_name || a.appointment_type?.name || null;
-      const cancelled_at = a.cancelled_at || a.cancellation_time || null;
-      return { ...a, cancelled_at, practitioner_name: pracName, patient_name: patientName, _patId: _patKey, appointment_type_name: apptTypeName };
+    const extractPatId = (a) => {
+      // Try all known Cliniko patient link locations
+      const link = a.links?.patient || a.patient?.links?.self || '';
+      if (link) {
+        const id = link.split('/').pop();
+        if (id) return String(id);
+      }
+      // Also try direct patient.id
+      if (a.patient?.id) return String(a.patient.id);
+      return null;
     };
 
+    const enrich = (a) => {
+      const pracId = (() => {
+        // Cliniko returns practitioner id in several places depending on API version
+        const link = a.practitioner?.links?.self || a.links?.practitioner || '';
+        if (link) return link.split('/').pop() || null;
+        // Also try direct practitioner.id field
+        if (a.practitioner?.id) return String(a.practitioner.id);
+        return null;
+      })();
+      const pracName = pracId ? (pracLookup[pracId] || null) : null;
+      // patient_name is a direct field on the appointment in this worker
+      const patientName = a.patient_name || null;
+      const patId = extractPatId(a);
+      const apptTypeName = a.appointment_type_name || a.appointment_type?.name || null;
+      // cancellation_time is the real field; cancelled_at may be null even when cancelled
+      const cancelled_at = a.cancelled_at || a.cancellation_time || null;
+      return { ...a, cancelled_at, practitioner_name: pracName, patient_name: patientName, _patId: patId, appointment_type_name: apptTypeName };
+    };
+
+    // Enrich all appointments
     allAppointments = rawAppts.map(a => enrich(a));
 
-    // Future appointments keyed by patient name for rebooking
+    // Future appointments keyed by patient ID for rebooking
     const futureByPatient = {};
     rawFuture.forEach(a => {
       if (a.cancelled_at || a.cancellation_time) return;
-      const key = a.patient_name?.trim().toLowerCase();
-      if (!key) return;
-      if (!futureByPatient[key]) futureByPatient[key] = [];
-      futureByPatient[key].push(a);
+      const patId = extractPatId(a);
+      if (!patId) return;
+      if (!futureByPatient[patId]) futureByPatient[patId] = [];
+      futureByPatient[patId].push(a);
     });
     window._futureByPatient = futureByPatient;
-    console.log(`🔍 Future appts: ${rawFuture.length} | unique patients with future bookings: ${Object.keys(futureByPatient).length}`);
 
-    // New patients: use API result directly — worker returns patients created/first-appt in period
+    // New patients: use the API result, cross-filter to those with an appointment this period
     showLoading('Fetching new patients...');
     const patientData = await apiGet('get_new_patients', { from: fromStr, to: toStr });
     const apiNewPatients = patientData.patients || [];
-    // Cross-check: only count new patients who have a matching appointment name in this period
-    const periodPatientNames = new Set(allAppointments.filter(a => !isCancelled(a)).map(a => a.patient_name?.trim().toLowerCase()).filter(Boolean));
-    allNewPatients = apiNewPatients
-      .filter(p => {
-        const fullName = [p.first_name, p.last_name].filter(Boolean).join(' ').trim().toLowerCase();
-        return periodPatientNames.has(fullName);
-      })
+    const periodPatientIds = new Set(allAppointments.filter(a => !isCancelled(a)).map(a => a._patId).filter(Boolean));
+    // Debug: compare ID formats
+    const sampleApptLink = allAppointments[0]?.links;
+    const samplePatId = allAppointments[0]?._patId;
+    const sampleNewPatId = apiNewPatients[0]?.id;
+    console.log(`🔍 New patients: API=${apiNewPatients.length} | period patient IDs: ${periodPatientIds.size} | sample appt links:`, sampleApptLink, `| sample _patId: "${samplePatId}" | sample new patient id: "${sampleNewPatId}"`);
+
+    // Cross-filter: only count new patients who had at least one appointment this period.
+    // If no patient IDs matched (ID format mismatch), fall back to all new patients in period.
+    const crossFiltered = apiNewPatients.filter(p => {
+      const pid = p.id ? String(p.id) : null;
+      return pid && periodPatientIds.has(pid);
+    });
+    allNewPatients = (crossFiltered.length > 0 ? crossFiltered : apiNewPatients)
       .map(p => ({
         ...p,
-        id: String(p.id || ''),
+        id: String(p.id),
         full_name: [p.first_name, p.last_name].filter(Boolean).join(' '),
-        referral_source: p.referral_source || p.referred_by || p.patient_referral_source || null,
+        referral_source: p.referral_source || p.referred_by || null,
       }));
-    console.log(`🔍 New patients: API=${apiNewPatients.length} → after name-match filter: ${allNewPatients.length} (Cliniko=5)`);
+    console.log(`🔍 New patients after cross-filter: ${allNewPatients.length} (crossFiltered: ${crossFiltered.length}, fallback: ${crossFiltered.length === 0})`);
 
     showLoading('Fetching invoices...');
     const invoiceData = await apiGet('get_invoices_range', { from: fromStr, to: toStr });
@@ -782,10 +762,12 @@ function isGroup(a) {
   return (a.appointment_type?.max_attendees > 1) || (a.max_attendees > 1)
       || (Array.isArray(a.attendees) && a.attendees.length > 0) || false;
 }
-// Attended: not DNA, not cancelled, AND patient arrived OR has note OR is a class
+// Attended: not DNA, not cancelled.
+// Cliniko does NOT reliably set patient_arrived — treat any non-cancelled, non-DNA appt as attended.
 function isAttended(a) {
-  if (a.did_not_arrive || a.cancelled_at || a.cancellation_time) return false;
-  return a.patient_arrived === true || a.treatment_note_status > 0 || isGroup(a);
+  if (a.did_not_arrive === true) return false;
+  if (a.cancelled_at || a.cancellation_time) return false;
+  return true;
 }
 // DNA: explicitly marked did_not_arrive
 function isDNA(a) { return a.did_not_arrive === true && !a.cancelled_at && !a.cancellation_time; }
@@ -876,6 +858,11 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   document.getElementById('stat-rebook-sub').textContent = `${rebookCount} of ${attendedPatientIds.size} patients rebooked`;
   document.getElementById('stat-avg-visits').textContent = avgVisits;
 
+  // Clients without upcoming appointment
+  const noUpcoming = [...attendedPatientIds].filter(patId => !rebookedPatients.has(patId)).length;
+  const noUpcomingEl = document.getElementById('stat-no-upcoming');
+  if (noUpcomingEl) noUpcomingEl.textContent = noUpcoming;
+
   // ── UPDATE REVENUE ────────────────────────────────
   document.getElementById('stat-revenue').textContent = '$' + totalRevenue.toFixed(2);
   document.getElementById('stat-avg-revenue').textContent = '$' + avgRevenue;
@@ -892,7 +879,6 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   buildTimeLost(appts, fromStr, toStr);
   generateDNAActions(appts.filter(isDNA));
   buildClasses(appts, invoices);
-  buildReferralEngine(newPatients, appts, invoices, fromStr, toStr);
 
   // Show cancellation debug in Classes tab banner so it's visible without console
   const banner = document.getElementById('cancel-debug-banner');
@@ -1397,123 +1383,6 @@ function buildTimeLost(appts, fromStr, toStr) {
 
   const note = document.getElementById('tl-note');
   if (note) note.textContent = `Capacity based on contracted weekly hours per practitioner × ${workDays} working days. Revenue estimated at $${RATE}/hr.`;
-}
-
-// ── REFERRAL ENGINE ────────────────────────────────
-let chartRefSources = null, chartRefTrend = null;
-const AVG_PATIENT_VALUE = 800; // est. lifetime value per new patient — editable
-
-function buildReferralEngine(newPatients, allAppts, invoices, fromStr, toStr) {
-  // Build referral source map from new patients
-  // Also try to enrich from appointment data (appointment has patient_name + practitioner)
-  const sourceMap = {}; // source → { count, patients: [] }
-
-  // Map patient name → their first appointment in period for practitioner + date
-  const nameToAppt = {};
-  allAppts.filter(a => !isCancelled(a)).forEach(a => {
-    const key = a.patient_name?.trim().toLowerCase();
-    if (!key) return;
-    if (!nameToAppt[key] || a.starts_at < nameToAppt[key].starts_at) nameToAppt[key] = a;
-  });
-
-  newPatients.forEach(p => {
-    const source = p.referral_source || p.referred_by || p.patient_referral_source || 'Unknown / Direct';
-    const srcKey = source.trim();
-    if (!sourceMap[srcKey]) sourceMap[srcKey] = { count: 0, patients: [] };
-    const fullName = p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || 'Unknown';
-    const nameKey = fullName.trim().toLowerCase();
-    const appt = nameToAppt[nameKey];
-    sourceMap[srcKey].count++;
-    sourceMap[srcKey].patients.push({
-      name: fullName,
-      practitioner: appt?.practitioner_name || '—',
-      date: appt?.starts_at?.slice(0,10) || '—',
-      source: srcKey,
-    });
-  });
-
-  const total = newPatients.length;
-  const sourceCount = Object.keys(sourceMap).length;
-  const sorted = Object.entries(sourceMap).sort((a, b) => b[1].count - a[1].count);
-  const topSource = sorted[0];
-
-  document.getElementById('ref-total').textContent = total;
-  document.getElementById('ref-sources').textContent = sourceCount;
-  document.getElementById('ref-top').textContent = topSource ? topSource[0] : '—';
-  document.getElementById('ref-top-sub').textContent = topSource ? `${topSource[1].count} patient${topSource[1].count !== 1 ? 's' : ''}` : '';
-
-  // Source breakdown table
-  const tbody = document.getElementById('ref-source-table');
-  if (!sorted.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">No referral data in this period</td></tr>';
-  } else {
-    tbody.innerHTML = sorted.map(([src, d]) => {
-      const pct = total > 0 ? Math.round((d.count / total) * 100) : 0;
-      const ltv = '$' + (d.count * AVG_PATIENT_VALUE).toLocaleString();
-      const barW = pct;
-      return `<tr>
-        <td class="fw">
-          ${src}
-          <div style="margin-top:4px;height:3px;border-radius:2px;background:var(--border);width:120px;">
-            <div style="height:3px;border-radius:2px;background:var(--sky);width:${barW}%;"></div>
-          </div>
-        </td>
-        <td class="mono c-sky">${d.count}</td>
-        <td class="mono" style="color:var(--muted2);">${pct}%</td>
-        <td class="mono c-success">${ltv}</td>
-      </tr>`;
-    }).join('');
-  }
-
-  // Patient list table
-  const ptbody = document.getElementById('ref-patient-table');
-  const allPatients = sorted.flatMap(([, d]) => d.patients).sort((a, b) => a.date.localeCompare(b.date));
-  if (!allPatients.length) {
-    ptbody.innerHTML = '<tr><td colspan="4" class="empty">No new patients in this period</td></tr>';
-  } else {
-    ptbody.innerHTML = allPatients.map(p => {
-      const dateStr = p.date !== '—' ? new Date(p.date + 'T00:00:00').toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' }) : '—';
-      const srcBadge = p.source === 'Unknown / Direct'
-        ? `<span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(100,100,100,0.2);color:var(--muted);">Direct</span>`
-        : `<span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(135,206,235,0.12);color:var(--sky);">${p.source}</span>`;
-      return `<tr>
-        <td class="fw">${p.name}</td>
-        <td style="font-size:12px;color:var(--muted2);">${p.practitioner}</td>
-        <td>${srcBadge}</td>
-        <td style="font-size:12px;color:var(--muted2);">${dateStr}</td>
-      </tr>`;
-    }).join('');
-  }
-
-  // Doughnut chart — sources
-  const colors = ['rgba(135,206,235,0.85)','rgba(74,222,128,0.8)','rgba(251,191,36,0.8)','rgba(248,113,113,0.8)','rgba(167,139,250,0.8)','rgba(251,146,60,0.8)','rgba(94,234,212,0.8)','rgba(244,114,182,0.8)'];
-  if (chartRefSources) chartRefSources.destroy();
-  if (sorted.length) {
-    chartRefSources = new Chart(document.getElementById('chart-referral-sources'), {
-      type: 'doughnut',
-      data: {
-        labels: sorted.map(([k]) => k),
-        datasets: [{ data: sorted.map(([, d]) => d.count), backgroundColor: sorted.map((_, i) => colors[i % colors.length]), borderWidth: 0 }]
-      },
-      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: '#888', font: { family: 'DM Sans', size: 11 }, boxWidth: 12, padding: 10 } } } }
-    });
-  }
-
-  // Line chart — new patients over time
-  const byDay = {};
-  let d = new Date(fromStr + 'T00:00:00');
-  const end = new Date(toStr + 'T00:00:00');
-  while (d <= end) { byDay[fmtDate(d)] = 0; d.setDate(d.getDate() + 1); }
-  sorted.flatMap(([, d]) => d.patients).forEach(p => { if (byDay[p.date] !== undefined) byDay[p.date]++; });
-  const trendLabels = Object.keys(byDay).map(k => new Date(k + 'T00:00:00').toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }));
-  const trendData = Object.values(byDay);
-
-  if (chartRefTrend) chartRefTrend.destroy();
-  chartRefTrend = new Chart(document.getElementById('chart-referral-trend'), {
-    type: 'bar',
-    data: { labels: trendLabels, datasets: [{ label: 'New Patients', data: trendData, backgroundColor: 'rgba(135,206,235,0.8)', borderRadius: 4 }] },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#222' }, ticks: { color: '#666', font: { family: 'DM Sans', size: 10 }, maxRotation: 45 } }, y: { grid: { color: '#222' }, ticks: { color: '#666', font: { family: 'DM Sans', size: 11 }, stepSize: 1 }, beginAtZero: true } } }
-  });
 }
 
 // ── CLASSES ────────────────────────────────────────

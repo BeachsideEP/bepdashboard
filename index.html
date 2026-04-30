@@ -410,7 +410,7 @@
       <div class="tab-content" id="tab-timelost">
         <div class="section-header">Time Lost — Open Slots</div>
         <div class="stat-grid-3" style="margin-bottom:24px;">
-          <div class="stat-card"><div class="stat-label">Open Slots Today</div><div class="stat-value c-warning" id="tl-slots">—</div><div class="stat-sub">in the schedule</div></div>
+          <div class="stat-card"><div class="stat-label">Open Slots (Period)</div><div class="stat-value c-warning" id="tl-slots">—</div><div class="stat-sub">across selected date range</div></div>
           <div class="stat-card"><div class="stat-label">Est. Hours Lost</div><div class="stat-value c-danger" id="tl-hours">—</div><div class="stat-sub">based on contracted hrs</div></div>
           <div class="stat-card"><div class="stat-label">Est. Revenue Lost</div><div class="stat-value c-danger" id="tl-rev">—</div><div class="stat-sub" id="tl-rate-sub">at $170/hr avg</div></div>
         </div>
@@ -607,35 +607,92 @@ async function loadDashboard() {
     const pracLookup = pracData.practitioners || {};
 
     showLoading('Fetching appointments...');
-    const apptData = await apiGet('get_appointments_range', { from: fromStr, to: toStr, include_cancelled: true });
-    const cancelData = await apiGet('get_appointments_range', { from: fromStr, to: toStr, cancelled: true });
-    // Merge: all active + all cancelled (dedupe by id)
+    // Single call — Cliniko returns cancelled_at on appointments that were cancelled
+    const apptData = await apiGet('get_appointments_range', { from: fromStr, to: toStr });
     const rawAppts = apptData.appointments || [];
-    const rawCancelled = cancelData.appointments || cancelData.cancelled_appointments || [];
-    const apptMap = {};
-    [...rawAppts, ...rawCancelled].forEach(a => { apptMap[a.id] = a; });
-    const allRaw = Object.values(apptMap);
-    // Enrich all appointments with practitioner names, patient names, type names
-    allAppointments = allRaw.map(a => {
-      // Practitioner name from lookup
+
+    // Fetch 90 days forward from period end for rebooking check
+    const futureTo = fmtDate(new Date(new Date(toStr + 'T00:00:00').getTime() + 90*24*60*60*1000));
+    const futureData = await apiGet('get_appointments_range', { from: toStr, to: futureTo });
+    const rawFuture = futureData.appointments || [];
+
+    // ── DEBUG ──
+    console.group('🔍 Raw API data');
+    console.log(`Period appts: ${rawAppts.length}, Future appts (next 90d): ${rawFuture.length}`);
+    if (rawAppts[0]) {
+      console.log('Sample appt keys:', Object.keys(rawAppts[0]));
+      console.log('Sample appt:', rawAppts[0]);
+      console.log('patient object:', rawAppts[0].patient);
+    }
+    const withCancelledAt = rawAppts.filter(a => a.cancelled_at);
+    console.log(`Appts with cancelled_at: ${withCancelledAt.length}`);
+    if (withCancelledAt[0]) console.log('Sample cancelled appt:', withCancelledAt[0]);
+    console.groupEnd();
+    // ── END DEBUG ──
+
+    const enrich = (a) => {
       const pracId = a.practitioner?.links?.self?.split('/').pop();
       const pracName = pracId ? (pracLookup[pracId] || null) : null;
-      // Patient name from embedded fields (Cliniko returns patient object on appointment)
-      const firstName = a.patient?.first_name || '';
-      const lastName = a.patient?.last_name || '';
-      const patientName = [firstName, lastName].filter(Boolean).join(' ') || null;
-      // Appointment type name
-      const apptTypeName = a.appointment_type?.name || a.appointment_type_name || null;
-      return { ...a, practitioner_name: pracName, patient_name: patientName, appointment_type_name: apptTypeName };
+      const patientName = [a.patient?.first_name, a.patient?.last_name].filter(Boolean).join(' ') || null;
+      // Try patient.id first (direct), then extract from links URL
+      const patId = a.patient?.id ? String(a.patient.id)
+                  : a.patient?.links?.self?.split('/').pop() || null;
+      const apptTypeName = a.appointment_type?.name || null;
+      return { ...a, practitioner_name: pracName, patient_name: patientName, _patId: patId, appointment_type_name: apptTypeName };
+    };
+    allAppointments = rawAppts.map(enrich);
+    // Future appointments for rebooking lookup — keyed by patient ID
+    const futureByPatient = {};
+    rawFuture.forEach(a => {
+      const patId = a.patient?.id ? String(a.patient.id) : a.patient?.links?.self?.split('/').pop();
+      if (!patId || a.cancelled_at) return;
+      if (!futureByPatient[patId]) futureByPatient[patId] = [];
+      futureByPatient[patId].push(a);
     });
+    window._futureByPatient = futureByPatient;
 
     showLoading('Fetching new patients...');
+    // New patients: Cliniko defines this as patients whose first-ever appointment is within the period
+    // We derive this from appointment data — find patients where their earliest appointment is in range
     const patientData = await apiGet('get_new_patients', { from: fromStr, to: toStr });
-    allNewPatients = (patientData.patients || []).map(p => ({
-      ...p,
-      full_name: [p.first_name, p.last_name].filter(Boolean).join(' '),
-      referral_source: p.referral_source || p.referred_by || null,
-    }));
+    console.group('🔍 New patients raw');
+    console.log('patientData keys:', Object.keys(patientData));
+    console.log('API patient count:', (patientData.patients||[]).length);
+    if (patientData.patients?.[0]) console.log('sample patient:', patientData.patients[0]);
+    console.groupEnd();
+
+    // Use the API result but also cross-check with appt data
+    // The API likely returns patients created (not first appointment) in the period — use appt data as source of truth
+    // Build: all patient IDs seen in the period, grouped by their earliest appointment date
+    const allPatientAppts = {}; // patId → earliest starts_at across ALL appts (including future)
+    [...allAppointments, ...rawFuture].forEach(a => {
+      if (!a._patId || isCancelled(a)) return;
+      if (!allPatientAppts[a._patId] || a.starts_at < allPatientAppts[a._patId]) {
+        allPatientAppts[a._patId] = a.starts_at;
+      }
+    });
+    // New patient = their earliest appointment falls within the selected period
+    const newPatientIds = new Set(
+      Object.entries(allPatientAppts)
+        .filter(([, firstAppt]) => firstAppt >= fromStr && firstAppt <= toStr + 'T23:59:59')
+        .map(([id]) => id)
+    );
+    // Build newPatients list from appointments for these IDs (for referral source etc)
+    const newPatientMap = {};
+    allAppointments.filter(a => a._patId && newPatientIds.has(a._patId)).forEach(a => {
+      if (!newPatientMap[a._patId]) {
+        newPatientMap[a._patId] = {
+          id: a._patId,
+          full_name: a.patient_name,
+          first_name: a.patient?.first_name,
+          last_name: a.patient?.last_name,
+          referral_source: a.patient?.referral_source || a.patient?.referred_by || null,
+          practitioner_name: a.practitioner_name,
+        };
+      }
+    });
+    allNewPatients = Object.values(newPatientMap);
+    console.log(`🔍 New patients derived from appt data: ${allNewPatients.length} (API said: ${(patientData.patients||[]).length})`);
 
     showLoading('Fetching invoices...');
     const invoiceData = await apiGet('get_invoices_range', { from: fromStr, to: toStr });
@@ -691,29 +748,49 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   const totalBooked = completed + cancelled.length;
   const cancelRate = totalBooked > 0 ? Math.round((cancelled.length / totalBooked) * 100) : 0;
 
+  // ── DEBUG ──
+  console.group('🔍 processAll breakdown');
+  console.log(`Total appts passed in: ${appts.length}`);
+  console.log(`Active (not cancelled): ${active.length}`);
+  console.log(`Cancelled: ${cancelled.length}`);
+  console.log(`Attended: ${attended}, DNA: ${dna}, Completed: ${completed}`);
+  console.log(`Cancel rate: ${cancelRate}% (${cancelled.length} of ${totalBooked})`);
+  console.log(`New patients: ${newPatients.length}`);
+  // Sample an active appt to check fields
+  if (active[0]) {
+    console.log('Sample active appt:', {
+      id: active[0].id,
+      starts_at: active[0].starts_at,
+      ends_at: active[0].ends_at,
+      did_not_arrive: active[0].did_not_arrive,
+      cancelled_at: active[0].cancelled_at,
+      treatment_note_status: active[0].treatment_note_status,
+      patient_name: active[0].patient_name,
+      practitioner_name: active[0].practitioner_name,
+      patient_links: active[0].patient?.links?.self,
+    });
+  }
+  if (cancelled[0]) console.log('Sample cancelled appt:', cancelled[0]);
+  console.groupEnd();
+  // ── END DEBUG ──
+
   // Note completion — % of attended that have notes
   const noteCompletion = attended > 0 ? Math.round((active.filter(a => isAttended(a) && a.treatment_note_status >= 90).length / attended) * 100) : 0;
 
-  // Unique patients who attended
-  const attendedPatientIds = new Set(active.filter(isAttended).map(a => a.patient?.links?.self?.split('/').pop()).filter(Boolean));
+  // Unique patients who attended — use _patId which is reliably extracted
+  const attendedPatientIds = new Set(active.filter(isAttended).map(a => a._patId).filter(Boolean));
   const avgVisits = attendedPatientIds.size > 0 ? (attended / attendedPatientIds.size).toFixed(1) : '0';
 
-  // Rebooking rate: patient attended their last appointment → did they have a future booking at that point?
-  // "At the conclusion of" = after ends_at (or starts_at if ends_at missing)
+  // Rebooking rate: of patients who attended, how many have a future non-cancelled appointment?
+  // Uses _futureByPatient populated from a separate 90-day forward fetch
+  const futureByPatient = window._futureByPatient || {};
   let rebookCount = 0;
   attendedPatientIds.forEach(patId => {
-    const patAppts = appts.filter(a => a.patient?.links?.self?.split('/').pop() === patId);
-    // Find the most recent attended appointment for this patient in the period
-    const lastAttended = patAppts.filter(isAttended)
-      .sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at))[0];
-    if (!lastAttended) return;
-    // The appointment concluded at ends_at, or starts_at as fallback
-    const concludedAt = lastAttended.ends_at || lastAttended.starts_at;
-    // Did they have any non-cancelled appointment starting AFTER that conclusion?
-    const hasFuture = patAppts.some(a => !isCancelled(a) && a.starts_at > concludedAt);
-    if (hasFuture) rebookCount++;
+    if (futureByPatient[patId] && futureByPatient[patId].length > 0) rebookCount++;
   });
   const rebookRate = attendedPatientIds.size > 0 ? Math.round((rebookCount / attendedPatientIds.size) * 100) : 0;
+
+  console.log(`🔍 Rebooking: ${rebookCount} of ${attendedPatientIds.size} attended patients have future appts → ${rebookRate}%`);
 
   // Revenue
   const totalRevenue = invoices.reduce((sum, inv) => sum + parseFloat(inv.total_amount || inv.amount || 0), 0);
@@ -816,13 +893,9 @@ function buildPracTable(appts, newPatients, invoices) {
   });
   // New patients — match by practitioner name via their first appointment
   newPatients.forEach(p => {
-    // Find any appointment for this patient
     const patId = p.id ? String(p.id) : null;
     if (!patId) return;
-    const appt = appts.find(a => {
-      const aPatId = a.patient?.links?.self?.split('/').pop();
-      return aPatId === patId && !isCancelled(a);
-    });
+    const appt = appts.find(a => a._patId === patId && !isCancelled(a));
     if (appt) {
       const name = appt.practitioner_name || '(no practitioner)';
       if (pracs[name]) pracs[name].newPts++;
@@ -926,14 +999,20 @@ function buildCancelTable(cancelled, allAppts) {
   const tbody = document.getElementById('cancel-table-body');
   if (!cancelled.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No cancellations in this period</td></tr>'; return; }
 
-  // Find next appointment for each patient
-  const today = new Date().toISOString().slice(0,10);
+  // Find next appointment for each patient — check period appts + future appts
   const nextApptByPatient = {};
+  const futureByPatient = window._futureByPatient || {};
+  // From future appts lookup
+  Object.entries(futureByPatient).forEach(([patId, appts]) => {
+    const earliest = appts.sort((a,b) => a.starts_at.localeCompare(b.starts_at))[0];
+    if (earliest) nextApptByPatient[patId] = earliest;
+  });
+  // Also check non-cancelled appts within period that are after today
+  const today = new Date().toISOString().slice(0,10);
   allAppts.forEach(a => {
-    if (!isCancelled(a) && a.starts_at?.slice(0,10) >= today) {
-      const patId = a.patient?.links?.self?.split('/').pop();
-      if (patId && (!nextApptByPatient[patId] || a.starts_at < nextApptByPatient[patId].starts_at)) {
-        nextApptByPatient[patId] = a;
+    if (!isCancelled(a) && a._patId && a.starts_at?.slice(0,10) >= today) {
+      if (!nextApptByPatient[a._patId] || a.starts_at < nextApptByPatient[a._patId].starts_at) {
+        nextApptByPatient[a._patId] = a;
       }
     }
   });
@@ -942,7 +1021,7 @@ function buildCancelTable(cancelled, allAppts) {
 
   tbody.innerHTML = sorted.map(a => {
     const id = a.id;
-    const patId = a.patient?.links?.self?.split('/').pop();
+    const patId = a._patId;
     const fu = getFollowUp(id);
     const cancelDate = new Date(a.cancelled_at).toLocaleDateString('en-AU',{day:'numeric',month:'short'});
     const apptDate = new Date(a.starts_at).toLocaleDateString('en-AU',{weekday:'short',day:'numeric',month:'short'});

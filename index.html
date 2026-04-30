@@ -610,13 +610,6 @@ async function loadDashboard() {
     const apptData = await apiGet('get_appointments_range', { from: fromStr, to: toStr });
     const rawAppts = apptData.appointments || [];
 
-    // Fetch cancelled appointments separately (worker filters them from main call)
-    showLoading('Fetching cancellations...');
-    const cancelledData = await apiGet('get_cancelled_appointments', { from: fromStr, to: toStr });
-    // Worker may return different key names — try all possibilities
-    const rawCancelled = cancelledData.appointments || cancelledData.cancelled_appointments
-                       || cancelledData.cancellations || [];
-
     // Fetch 90 days forward for rebooking check (start day AFTER period ends)
     showLoading('Fetching future appointments...');
     const dayAfter = fmtDate(new Date(new Date(toStr + 'T00:00:00').getTime() + 24*60*60*1000));
@@ -624,17 +617,19 @@ async function loadDashboard() {
     const futureData = await apiGet('get_appointments_range', { from: dayAfter, to: futureTo });
     const rawFuture = futureData.appointments || [];
 
-    // Debug — visible in browser console
+    // Debug — open browser console to see this
     console.group('🔍 BEP Raw API');
-    console.log('Period appts:', rawAppts.length);
-    console.log('Cancelled appts:', rawCancelled.length, '| cancelledData keys:', Object.keys(cancelledData));
-    console.log('Future appts:', rawFuture.length);
-    if (rawAppts[0]) { console.log('Sample appt:', rawAppts[0]); console.log('patient obj:', rawAppts[0].patient); }
-    if (rawCancelled[0]) console.log('Sample cancelled:', rawCancelled[0]);
-    // Check if cancelled_at appears in main response at all
+    console.log('Period appts:', rawAppts.length, '| Future appts:', rawFuture.length);
+    console.log('apptData top-level keys:', Object.keys(apptData));
+    if (rawAppts[0]) {
+      console.log('Sample appt keys:', Object.keys(rawAppts[0]));
+      console.log('Sample appt:', rawAppts[0]);
+      console.log('patient obj:', rawAppts[0].patient);
+    }
     const inlineCancel = rawAppts.filter(a => a.cancelled_at);
-    console.log('Inline cancelled_at in main response:', inlineCancel.length);
-    if (inlineCancel[0]) console.log('Inline cancelled sample:', inlineCancel[0]);
+    console.log('Appts with cancelled_at in response:', inlineCancel.length);
+    if (inlineCancel[0]) console.log('Sample cancelled:', inlineCancel[0]);
+    else console.warn('⚠️ No cancelled_at found — worker may be filtering cancelled appts out');
     console.groupEnd();
 
     const extractPatId = (a) =>
@@ -650,16 +645,8 @@ async function loadDashboard() {
       return { ...a, cancelled_at, practitioner_name: pracName, patient_name: patientName, _patId: patId, appointment_type_name: apptTypeName };
     };
 
-    // Merge: period appts + cancelled appts (dedupe by id, cancelled wins)
-    const apptMap = {};
-    rawAppts.forEach(a => { apptMap[String(a.id)] = enrich(a); });
-    // Cancelled appointments — mark with cancelled_at if not already set
-    rawCancelled.forEach(a => {
-      apptMap[String(a.id)] = enrich(a, a.cancelled_at || a.cancellation_date || new Date().toISOString());
-    });
-    // Also check inline cancelled in main response
-    inlineCancel.forEach(a => { apptMap[String(a.id)] = enrich(a); });
-    allAppointments = Object.values(apptMap);
+    // Enrich all appointments
+    allAppointments = rawAppts.map(a => enrich(a));
 
     // Future appointments keyed by patient ID for rebooking
     const futureByPatient = {};

@@ -53,42 +53,32 @@ export default {
       'User-Agent': 'BEP-Dashboard/1.0 (admin@beachsideep.com.au)',
     };
 
-    // Build a Cliniko URL with properly encoded q[] filters
-    function clinikoUrl(endpoint, params = {}) {
-      // Build query string manually so q[] brackets are encoded correctly
-      const parts = [];
-      for (const [k, v] of Object.entries(params)) {
-        if (Array.isArray(v)) {
-          v.forEach(val => parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(val)}`));
-        } else {
-          parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
-        }
-      }
-      return `${CLINIKO_BASE}/${endpoint}${parts.length ? '?' + parts.join('&') : ''}`;
-    }
-
-    async function clinikoFetch(endpoint, params = {}) {
-      const fullUrl = clinikoUrl(endpoint, params);
+    // Simple fetch — build URL as plain string, Cliniko accepts unencoded q[]
+    async function clinikoFetch(path) {
+      const fullUrl = `${CLINIKO_BASE}/${path}`;
       const res = await fetch(fullUrl, { headers: clinikoHeaders });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Cliniko ${res.status}: ${text.slice(0, 200)}`);
-      }
-      return res.json();
+      const text = await res.text();
+      if (!res.ok) throw new Error(`Cliniko ${res.status}: ${text.slice(0, 300)}`);
+      return JSON.parse(text);
     }
 
-    // Paginate through all results
-    async function fetchAll(endpoint, baseParams, arrayKey, stopWhen, maxPages = 50) {
+    // Paginate — follows links.next until no more pages or stopWhen returns false
+    async function fetchAll(firstPath, arrayKey, stopWhen, maxPages = 50) {
       let items = [];
-      let page = 1;
-      while (page <= maxPages) {
-        const data = await clinikoFetch(endpoint, { ...baseParams, per_page: 100, page });
+      let path = firstPath;
+      let page = 0;
+      while (path && page < maxPages) {
+        const data = await clinikoFetch(path);
         const batch = data[arrayKey] || [];
-        if (!batch.length) break;
         items = items.concat(batch);
-        const last = batch[batch.length - 1];
-        if (batch.length < 100 || !data.links?.next || (stopWhen && !stopWhen(last))) break;
         page++;
+        // Follow next link if present — strip the base URL
+        const nextUrl = data.links?.next;
+        if (!nextUrl || batch.length < 100) break;
+        const last = batch[batch.length - 1];
+        if (stopWhen && !stopWhen(last)) break;
+        // Extract just the path+query from the full next URL
+        path = nextUrl.replace(CLINIKO_BASE + '/', '');
       }
       return items;
     }
@@ -99,7 +89,7 @@ export default {
 
       // ── GET PRACTITIONERS ──────────────────────────
       if (action === 'get_practitioners') {
-        const data = await clinikoFetch('practitioners', { per_page: 100 });
+        const data = await clinikoFetch('practitioners?per_page=100');
         const lookup = {};
         (data.practitioners || []).forEach(p => {
           lookup[p.id] = `${p.first_name} ${p.last_name}`.trim();
@@ -114,25 +104,17 @@ export default {
           return new Response(JSON.stringify({ error: 'from and to required' }), { status: 400, headers: corsHeaders });
         }
 
-        const baseParams = {
-          sort: 'starts_at',
-          order: 'asc',
-          'q[]': [`starts_at:>=${from} 00:00:00`, `starts_at:<=${to} 23:59:59`],
-        };
-
-        // Active appointments
-        const activeAppts = await fetchAll('appointments', baseParams, 'appointments',
+        // Active appointments in range
+        const activePath = `appointments?per_page=100&sort=starts_at&order=asc&q[]=starts_at:>=${from} 00:00:00&q[]=starts_at:<=${to} 23:59:59`;
+        const activeAppts = await fetchAll(activePath, 'appointments',
           last => last.starts_at?.slice(0,10) <= to, 30);
 
-        // Cancelled appointments — add cancelled_at filter
-        const cancelParams = {
-          ...baseParams,
-          'q[]': [`starts_at:>=${from} 00:00:00`, `starts_at:<=${to} 23:59:59`, `cancelled_at:>=2000-01-01`],
-        };
-        const cancelAppts = await fetchAll('appointments', cancelParams, 'appointments',
+        // Cancelled appointments in same range (Cliniko excludes these from default response)
+        const cancelPath = `appointments?per_page=100&sort=starts_at&order=asc&q[]=starts_at:>=${from} 00:00:00&q[]=starts_at:<=${to} 23:59:59&q[]=cancelled_at:>=2000-01-01`;
+        const cancelAppts = await fetchAll(cancelPath, 'appointments',
           last => last.starts_at?.slice(0,10) <= to, 30);
 
-        // Merge — cancelled record overwrites active (has cancelled_at populated)
+        // Merge — cancelled record wins on duplicate IDs
         const merged = {};
         activeAppts.forEach(a => { merged[a.id] = a; });
         cancelAppts.forEach(a => { merged[a.id] = a; });
@@ -153,11 +135,9 @@ export default {
           return new Response(JSON.stringify({ error: 'from and to required' }), { status: 400, headers: corsHeaders });
         }
 
-        const patients = await fetchAll('patients', {
-          sort: 'created_at',
-          order: 'desc',
-          'q[]': [`created_at:>=${from} 00:00:00`, `created_at:<=${to} 23:59:59`],
-        }, 'patients', last => last.created_at?.slice(0,10) >= from, 10);
+        const path = `patients?per_page=100&sort=created_at&order=desc&q[]=created_at:>=${from} 00:00:00&q[]=created_at:<=${to} 23:59:59`;
+        const patients = await fetchAll(path, 'patients',
+          last => last.created_at?.slice(0,10) >= from, 10);
 
         return new Response(JSON.stringify({ patients }), { headers: corsHeaders });
 
@@ -169,11 +149,9 @@ export default {
           return new Response(JSON.stringify({ error: 'from and to required' }), { status: 400, headers: corsHeaders });
         }
 
-        const invoices = await fetchAll('invoices', {
-          sort: 'created_at',
-          order: 'desc',
-          'q[]': [`created_at:>=${from} 00:00:00`, `created_at:<=${to} 23:59:59`],
-        }, 'invoices', last => last.created_at?.slice(0,10) >= from, 50);
+        const path = `invoices?per_page=100&sort=created_at&order=desc&q[]=created_at:>=${from} 00:00:00&q[]=created_at:<=${to} 23:59:59`;
+        const invoices = await fetchAll(path, 'invoices',
+          last => last.created_at?.slice(0,10) >= from, 50);
 
         return new Response(JSON.stringify({ invoices }), { headers: corsHeaders });
 

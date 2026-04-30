@@ -618,7 +618,11 @@ async function apiGet(action, params={}) {
   const qs = new URLSearchParams({action, ...params}).toString();
   const res = await fetch(`${WORKER}?${qs}`, { headers: { 'Authorization': 'Bearer ' + token } });
   if (res.status === 401) { doLogout(); throw new Error('Session expired'); }
-  if (!res.ok) throw new Error('API error ' + res.status);
+  if (!res.ok) {
+    let msg = `API error ${res.status}`;
+    try { const body = await res.json(); msg = body.error || msg; } catch(_) {}
+    throw new Error(msg);
+  }
   return res.json();
 }
 

@@ -67,6 +67,11 @@ async function handleRequest(request, env, corsHeaders) {
 
     async function clinikoGet(path) {
       const res = await fetch(`${CLINIKO_BASE}/${path}`, { headers: authHeaders });
+      if (!res.ok) {
+        let body = '';
+        try { body = await res.text(); } catch(_) {}
+        throw new Error(`Cliniko API error ${res.status} on ${path}: ${body.slice(0, 200)}`);
+      }
       return res.json();
     }
 

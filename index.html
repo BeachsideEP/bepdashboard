@@ -411,9 +411,27 @@
         <div class="section-header">Time Lost — Open Slots</div>
         <div class="stat-grid-3" style="margin-bottom:24px;">
           <div class="stat-card"><div class="stat-label">Open Slots Today</div><div class="stat-value c-warning" id="tl-slots">—</div><div class="stat-sub">in the schedule</div></div>
-          <div class="stat-card"><div class="stat-label">Est. Hours Lost</div><div class="stat-value c-danger" id="tl-hours">—</div><div class="stat-sub">based on 1hr slots</div></div>
-          <div class="stat-card"><div class="stat-label">Est. Revenue Lost</div><div class="stat-value c-danger" id="tl-rev">—</div><div class="stat-sub">at $150/hr avg</div></div>
+          <div class="stat-card"><div class="stat-label">Est. Hours Lost</div><div class="stat-value c-danger" id="tl-hours">—</div><div class="stat-sub">based on contracted hrs</div></div>
+          <div class="stat-card"><div class="stat-label">Est. Revenue Lost</div><div class="stat-value c-danger" id="tl-rev">—</div><div class="stat-sub" id="tl-rate-sub">at $170/hr avg</div></div>
         </div>
+
+        <!-- Editable practitioner hours -->
+        <div class="table-card" style="margin-bottom:24px;">
+          <div class="table-header" style="display:flex;justify-content:space-between;align-items:center;">
+            <div class="table-title">Practitioner Hours &amp; Rate</div>
+            <button onclick="savePracHours()" style="background:var(--sky);color:#0f0f0f;border:none;border-radius:7px;padding:6px 14px;font-size:12px;font-family:'DM Sans',sans-serif;font-weight:500;cursor:pointer;">Save Changes</button>
+          </div>
+          <div id="prac-hours-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;padding:16px 0 4px;">
+            <!-- populated by renderPracHoursEditor() -->
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;padding:12px 0 4px;border-top:1px solid var(--border);margin-top:8px;">
+            <span style="font-size:13px;color:var(--muted);white-space:nowrap;">$/hr rate:</span>
+            <input type="number" id="tl-rate-input" min="1" max="1000" step="1" value="170"
+              style="width:90px;background:var(--surface2);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;color:var(--white);font-family:'DM Mono',monospace;font-size:14px;">
+            <span style="font-size:12px;color:var(--muted);">applied to all open slot calculations</span>
+          </div>
+        </div>
+
         <div class="chart-card" style="margin-bottom:24px;">
           <div class="chart-header"><div><div class="chart-title">Daily Utilisation</div><div class="chart-sub">Attended vs open slots over period</div></div></div>
           <div style="height:220px;"><canvas id="chart-timelost"></canvas></div>
@@ -487,6 +505,7 @@ function switchTab(name, el) {
   document.getElementById('tab-' + name).classList.add('active');
   if (el) el.classList.add('active');
   document.getElementById('tab-title').textContent = TAB_TITLES[name] || name;
+  if (name === 'timelost') renderPracHoursEditor();
 }
 
 // ── AUTH ──────────────────────────────────────────
@@ -588,9 +607,16 @@ async function loadDashboard() {
     const pracLookup = pracData.practitioners || {};
 
     showLoading('Fetching appointments...');
-    const apptData = await apiGet('get_appointments_range', { from: fromStr, to: toStr });
-    // Enrich appointments with practitioner names from lookup
-    allAppointments = (apptData.appointments || []).map(a => {
+    const apptData = await apiGet('get_appointments_range', { from: fromStr, to: toStr, include_cancelled: true });
+    const cancelData = await apiGet('get_appointments_range', { from: fromStr, to: toStr, cancelled: true });
+    // Merge: all active + all cancelled (dedupe by id)
+    const rawAppts = apptData.appointments || [];
+    const rawCancelled = cancelData.appointments || cancelData.cancelled_appointments || [];
+    const apptMap = {};
+    [...rawAppts, ...rawCancelled].forEach(a => { apptMap[a.id] = a; });
+    const allRaw = Object.values(apptMap);
+    // Enrich all appointments with practitioner names, patient names, type names
+    allAppointments = allRaw.map(a => {
       // Practitioner name from lookup
       const pracId = a.practitioner?.links?.self?.split('/').pop();
       const pracName = pracId ? (pracLookup[pracId] || null) : null;
@@ -672,12 +698,19 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   const attendedPatientIds = new Set(active.filter(isAttended).map(a => a.patient?.links?.self?.split('/').pop()).filter(Boolean));
   const avgVisits = attendedPatientIds.size > 0 ? (attended / attendedPatientIds.size).toFixed(1) : '0';
 
-  // Rebooking rate: of patients who attended, how many have a future (upcoming) non-cancelled appointment?
-  const nowISO = new Date().toISOString();
+  // Rebooking rate: patient attended their last appointment → did they have a future booking at that point?
+  // "At the conclusion of" = after ends_at (or starts_at if ends_at missing)
   let rebookCount = 0;
   attendedPatientIds.forEach(patId => {
     const patAppts = appts.filter(a => a.patient?.links?.self?.split('/').pop() === patId);
-    const hasFuture = patAppts.some(a => !isCancelled(a) && a.starts_at > nowISO);
+    // Find the most recent attended appointment for this patient in the period
+    const lastAttended = patAppts.filter(isAttended)
+      .sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at))[0];
+    if (!lastAttended) return;
+    // The appointment concluded at ends_at, or starts_at as fallback
+    const concludedAt = lastAttended.ends_at || lastAttended.starts_at;
+    // Did they have any non-cancelled appointment starting AFTER that conclusion?
+    const hasFuture = patAppts.some(a => !isCancelled(a) && a.starts_at > concludedAt);
     if (hasFuture) rebookCount++;
   });
   const rebookRate = attendedPatientIds.size > 0 ? Math.round((rebookCount / attendedPatientIds.size) * 100) : 0;
@@ -1046,17 +1079,73 @@ function generateDNAActions(dnAppts) {
 
 // ── TIME LOST ──────────────────────────────────────
 let chartTimeLost = null;
-const RATE_PER_HOUR = 170;
+const RATE_PER_HOUR_DEFAULT = 170;
+// Default contracted weekly hours — editable in UI, persisted to localStorage
+const PRAC_HOURS_DEFAULTS = { braeden: 30, sierra: 28, meg: 17, sharon: 5, samadi: 5 };
 
-// Contracted weekly clinical hours per practitioner (matched on first name)
-const PRAC_WEEKLY_HOURS = { braeden: 30, sierra: 28, meg: 17, sharon: 5, samadi: 5 };
+function getPracHoursStore() {
+  try { return JSON.parse(localStorage.getItem('bep_prac_hours') || 'null') || {...PRAC_HOURS_DEFAULTS}; }
+  catch(e) { return {...PRAC_HOURS_DEFAULTS}; }
+}
+function getRateStore() {
+  const v = parseFloat(localStorage.getItem('bep_rate_per_hour'));
+  return isNaN(v) ? RATE_PER_HOUR_DEFAULT : v;
+}
 function getPracWeeklyHours(name) {
   if (!name) return null;
   const key = name.trim().toLowerCase().split(' ')[0];
-  return PRAC_WEEKLY_HOURS[key] ?? null;
+  const store = getPracHoursStore();
+  return store[key] ?? null;
+}
+
+function renderPracHoursEditor() {
+  const store = getPracHoursStore();
+  const grid = document.getElementById('prac-hours-grid');
+  if (!grid) return;
+  // Show all stored practitioners — merge defaults + any extras
+  const allKeys = new Set([...Object.keys(PRAC_HOURS_DEFAULTS), ...Object.keys(store)]);
+  grid.innerHTML = [...allKeys].map(key => `
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:9px;padding:12px 14px;">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:6px;text-transform:capitalize;">${key}</div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <input type="number" id="prac-hrs-${key}" min="0" max="60" step="0.5" value="${store[key] ?? ''}"
+          style="width:60px;background:var(--bg);border:1px solid var(--border2);border-radius:6px;padding:5px 8px;color:var(--white);font-family:'DM Mono',monospace;font-size:14px;text-align:center;">
+        <span style="font-size:12px;color:var(--muted);">hrs/wk</span>
+      </div>
+    </div>`).join('');
+
+  const rateInput = document.getElementById('tl-rate-input');
+  if (rateInput) rateInput.value = getRateStore();
+}
+
+function savePracHours() {
+  const store = getPracHoursStore();
+  const allKeys = new Set([...Object.keys(PRAC_HOURS_DEFAULTS), ...Object.keys(store)]);
+  const newStore = {};
+  allKeys.forEach(key => {
+    const el = document.getElementById('prac-hrs-' + key);
+    if (el) { const v = parseFloat(el.value); if (!isNaN(v) && v >= 0) newStore[key] = v; }
+  });
+  localStorage.setItem('bep_prac_hours', JSON.stringify(newStore));
+  const rateEl = document.getElementById('tl-rate-input');
+  if (rateEl) {
+    const r = parseFloat(rateEl.value);
+    if (!isNaN(r) && r > 0) localStorage.setItem('bep_rate_per_hour', String(r));
+  }
+  // Rebuild if data is loaded
+  if (allAppointments.length) {
+    const fromStr = document.getElementById('date-from').value;
+    const toStr = document.getElementById('date-to').value;
+    buildTimeLost(allAppointments, fromStr, toStr);
+  }
+  const btn = document.querySelector('[onclick="savePracHours()"]');
+  if (btn) { btn.textContent = '✓ Saved'; setTimeout(() => btn.textContent = 'Save Changes', 1500); }
 }
 
 function buildTimeLost(appts, fromStr, toStr) {
+  const RATE = getRateStore();
+  const hoursStore = getPracHoursStore();
+
   // Count working days in range
   let workDays = 0;
   let d = new Date(fromStr + 'T00:00:00');
@@ -1068,7 +1157,8 @@ function buildTimeLost(appts, fromStr, toStr) {
   // Per-practitioner capacity: weeklyHours ÷ 5 days × workDays
   const pracData = {};
   pracSet.forEach(name => {
-    const wkHrs = getPracWeeklyHours(name);
+    const key = name.trim().toLowerCase().split(' ')[0];
+    const wkHrs = hoursStore[key] ?? null;
     const capacity = wkHrs != null ? Math.round((wkHrs / 5) * workDays) : null;
     pracData[name] = { attended: 0, dna: 0, cancelled: 0, capacity, wkHrs };
   });
@@ -1087,14 +1177,16 @@ function buildTimeLost(appts, fromStr, toStr) {
     if (p.capacity != null) { totalCapacity += p.capacity; totalAttended += p.attended; }
   });
   const openSlots = Math.max(0, totalCapacity - totalAttended);
-  const revLost = openSlots * RATE_PER_HOUR;
+  const revLost = openSlots * RATE;
 
   document.getElementById('tl-slots').textContent = openSlots;
   document.getElementById('tl-hours').textContent = openSlots + 'h';
   document.getElementById('tl-rev').textContent = '$' + revLost.toLocaleString();
+  const rateSub = document.getElementById('tl-rate-sub');
+  if (rateSub) rateSub.textContent = 'at $' + RATE + '/hr';
 
-  // Chart — daily capacity = sum of all contracted weekly hours ÷ 5
-  const knownWeeklyTotal = Object.values(PRAC_WEEKLY_HOURS).reduce((s, h) => s + h, 0);
+  // Chart — daily capacity = sum of contracted weekly hours ÷ 5
+  const knownWeeklyTotal = Object.values(hoursStore).reduce((s, h) => s + h, 0);
   const dailyCapacity = knownWeeklyTotal / 5;
   const days = {};
   let d2 = new Date(fromStr + 'T00:00:00');
@@ -1128,7 +1220,7 @@ function buildTimeLost(appts, fromStr, toStr) {
   tbody.innerHTML = Object.entries(pracData).sort((a,b) => b[1].attended - a[1].attended).map(([name, p]) => {
     const util = (p.capacity != null && p.capacity > 0) ? Math.round((p.attended / p.capacity) * 100) : null;
     const lost = p.capacity != null ? Math.max(0, p.capacity - p.attended) : null;
-    const lostRev = lost != null ? '$' + (lost * RATE_PER_HOUR).toLocaleString() : '—';
+    const lostRev = lost != null ? '$' + (lost * RATE).toLocaleString() : '—';
     const utilDisplay = util != null ? util + '%' : '—';
     const utilColor = util == null ? 'var(--muted)' : util >= 80 ? 'var(--success)' : util >= 60 ? 'var(--warning)' : 'var(--danger)';
     return `<tr>
@@ -1142,7 +1234,7 @@ function buildTimeLost(appts, fromStr, toStr) {
   }).join('') || '<tr><td colspan="6" class="empty">No data</td></tr>';
 
   const note = document.getElementById('tl-note');
-  if (note) note.textContent = `Capacity based on contracted weekly hours per practitioner × ${workDays} working days. Revenue estimated at $${RATE_PER_HOUR}/hr.`;
+  if (note) note.textContent = `Capacity based on contracted weekly hours per practitioner × ${workDays} working days. Revenue estimated at $${RATE}/hr.`;
 }
 
 // ── TEAM MANAGEMENT ───────────────────────────────
@@ -1289,6 +1381,7 @@ async function importPractitioners() {
 window.addEventListener('DOMContentLoaded', () => {
   renderActions();
   renderTeam();
+  renderPracHoursEditor();
 });
 
 // ── INIT ──────────────────────────────────────────

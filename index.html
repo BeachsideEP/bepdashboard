@@ -240,6 +240,10 @@
         <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
         Team
       </div>
+      <div class="nav-item" onclick="switchTab('classes', this)">
+        <svg viewBox="0 0 24 24"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+        Classes
+      </div>
     </div>
     <div class="sidebar-footer">
       <div style="font-size:11px; color:var(--muted); margin-bottom:10px;" id="last-updated">Not yet loaded</div>
@@ -484,6 +488,33 @@
         </div>
       </div>
 
+      <!-- CLASSES TAB -->
+      <div class="tab-content" id="tab-classes">
+        <div class="section-header">Classes</div>
+
+        <!-- Debug banner for cancellation investigation -->
+        <div id="cancel-debug-banner" style="display:none;background:rgba(251,191,36,0.1);border:1px solid var(--warning);border-radius:10px;padding:14px 18px;margin-bottom:20px;font-size:12px;font-family:'DM Mono',monospace;color:var(--warning);white-space:pre-wrap;"></div>
+
+        <div class="stat-grid-3" style="margin-bottom:24px;">
+          <div class="stat-card"><div class="stat-label">Total Classes</div><div class="stat-value c-sky" id="cls-total">—</div><div class="stat-sub">in selected period</div></div>
+          <div class="stat-card"><div class="stat-label">Total Attendees</div><div class="stat-value c-success" id="cls-attendees">—</div><div class="stat-sub">across all classes</div></div>
+          <div class="stat-card"><div class="stat-label">Est. Class Revenue</div><div class="stat-value c-success" id="cls-revenue">—</div><div class="stat-sub">from class invoices</div></div>
+        </div>
+
+        <div class="chart-card" style="margin-bottom:24px;">
+          <div class="chart-header"><div><div class="chart-title">Attendance by Timeslot</div><div class="chart-sub">Average attendees per day/time slot</div></div></div>
+          <div style="height:240px;"><canvas id="chart-classes"></canvas></div>
+        </div>
+
+        <div class="table-card">
+          <div class="table-header"><div class="table-title">Class Breakdown</div></div>
+          <table>
+            <thead><tr><th>Class Name</th><th>Day & Time</th><th>Sessions</th><th>Total Attendees</th><th>Avg / Session</th><th>Est. Revenue</th></tr></thead>
+            <tbody id="cls-table-body"><tr><td colspan="6" class="empty">Load data to view</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
     </div>
   </main>
 </div>
@@ -498,7 +529,7 @@ let chartAppts = null, chartDna = null, chartPrac = null, chartRevenue = null;
 let allAppointments = [], allNewPatients = [], allInvoices = [];
 
 // ── TAB SWITCHING ──────────────────────────────────
-const TAB_TITLES = { overview: 'Overview', practitioners: 'Practitioners', cancellations: 'Cancellations', revenue: 'Revenue', actions: 'Action Centre', timelost: 'Time Lost', team: 'Team' };
+const TAB_TITLES = { overview: 'Overview', practitioners: 'Practitioners', cancellations: 'Cancellations', revenue: 'Revenue', actions: 'Action Centre', timelost: 'Time Lost', team: 'Team', classes: 'Classes' };
 function switchTab(name, el) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -721,11 +752,15 @@ function isCancelled(a) { return !!a.cancelled_at; }
 // ── PROCESS ALL DATA ──────────────────────────────
 function processAll(appts, newPatients, invoices, fromStr, toStr) {
   // Filter to date range (exclude cancelled from main counts)
+  const nowISO = new Date().toISOString();
   const active = appts.filter(a => !isCancelled(a));
   const cancelled = appts.filter(isCancelled);
-  const total = active.length;
-  const attended = active.filter(isAttended).length;
-  const dna = active.filter(isDNA).length;
+  // Only count appointments that have already started (exclude future bookings in period)
+  // Cliniko's "total" counts past+present, not upcoming in range
+  const pastActive = active.filter(a => a.starts_at <= nowISO);
+  const total = pastActive.length;
+  const attended = pastActive.filter(isAttended).length;
+  const dna = pastActive.filter(isDNA).length;
   // No pending — every active appt is attended or DNA
   const completed = attended + dna;
   const attendanceRate = completed > 0 ? Math.round((attended / completed) * 100) : 0;
@@ -763,20 +798,20 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   const noteCompletion = attended > 0 ? Math.round((active.filter(a => isAttended(a) && a.treatment_note_status >= 90).length / attended) * 100) : 0;
 
   // Unique patients who attended — use _patId which is reliably extracted
-  const attendedPatientIds = new Set(active.filter(isAttended).map(a => a._patId).filter(Boolean));
+  const attendedPatientIds = new Set(pastActive.filter(isAttended).map(a => a._patId).filter(Boolean));
   const avgVisits = attendedPatientIds.size > 0 ? (attended / attendedPatientIds.size).toFixed(1) : '0';
 
-  // Rebooking rate: of patients who attended, how many have a future non-cancelled appointment?
+  // Rebooking: attended patient has ANY future non-cancelled booking:
+  // 1. In the 90-day forward fetch (window._futureByPatient)
+  // 2. OR later in the same period (e.g. attended Mon, has booking Thu same week)
   const futureByPatient = window._futureByPatient || {};
+  const rebookedPatients = new Set();
+  Object.entries(futureByPatient).forEach(([patId, fa]) => { if (fa.length > 0) rebookedPatients.add(patId); });
+  active.filter(a => a.starts_at > nowISO && a._patId).forEach(a => rebookedPatients.add(a._patId));
   let rebookCount = 0;
-  attendedPatientIds.forEach(patId => {
-    if (futureByPatient[patId]?.length > 0) rebookCount++;
-  });
+  attendedPatientIds.forEach(patId => { if (rebookedPatients.has(patId)) rebookCount++; });
   const rebookRate = attendedPatientIds.size > 0 ? Math.round((rebookCount / attendedPatientIds.size) * 100) : 0;
-  // Debug: log ID samples to check string/number type consistency
-  const attendedSample = [...attendedPatientIds].slice(0,5);
-  const futureSample = Object.keys(futureByPatient).slice(0,5);
-  console.log(`🔍 Rebook: ${rebookCount}/${attendedPatientIds.size}=${rebookRate}% | attended IDs sample: [${attendedSample}] | future IDs sample: [${futureSample}]`);
+  console.log(`🔍 Rebook: ${rebookCount}/${attendedPatientIds.size}=${rebookRate}% | 90d future patients:${Object.keys(futureByPatient).length} in-period future appts:${active.filter(a=>a.starts_at>nowISO).length}`);
 
   // Revenue
   const totalRevenue = invoices.reduce((sum, inv) => sum + parseFloat(inv.total_amount || inv.amount || 0), 0);
@@ -812,6 +847,18 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   buildRevenueTable(invoices, active);
   buildTimeLost(appts, fromStr, toStr);
   generateDNAActions(appts.filter(isDNA));
+  buildClasses(appts, invoices);
+
+  // Show cancellation debug in Classes tab banner so it's visible without console
+  const banner = document.getElementById('cancel-debug-banner');
+  if (banner) {
+    const sampleCancelled = cancelled[0];
+    banner.style.display = cancelled.length === 0 ? 'block' : 'none';
+    if (cancelled.length === 0) {
+      const sampleActive = appts[0];
+      banner.textContent = `⚠ Cancellation debug: 0 cancelled appts found.\nTotal appts received: ${appts.length}\nSample appt keys: ${sampleActive ? Object.keys(sampleActive).join(', ') : 'none'}\ncancelled_at on sample: ${sampleActive?.cancelled_at ?? 'field missing'}\ndid_not_arrive on sample: ${sampleActive?.did_not_arrive ?? 'field missing'}`;
+    }
+  }
 }
 
 // ── CHARTS ────────────────────────────────────────
@@ -950,8 +997,13 @@ function buildDnaList(appts) {
     const dt = new Date(a.starts_at);
     const date = dt.toLocaleDateString('en-AU',{weekday:'short',day:'numeric',month:'short'});
     const time = dt.toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'});
+    // Multiple fallbacks for patient name
+    const name = a.patient_name
+      || [a.patient?.first_name, a.patient?.last_name].filter(Boolean).join(' ')
+      || a.patient?.name
+      || (a._patId ? `Patient #${a._patId}` : 'Unknown');
     return `<div class="dna-item">
-      <div><div class="dna-name">${a.patient_name||'Unknown'}</div><div class="dna-date">${date} at ${time} · ${a.practitioner_name||''}</div></div>
+      <div><div class="dna-name">${name}</div><div class="dna-date">${date} at ${time} · ${a.practitioner_name||''}</div></div>
       <div class="dna-badge">DNA</div>
     </div>`;
   }).join('');
@@ -1031,7 +1083,7 @@ function buildCancelTable(cancelled, allAppts) {
       </div>`;
 
     return `<tr>
-      <td class="fw">${a.patient_name||'Unknown'}</td>
+      <td class="fw">${a.patient_name || [a.patient?.first_name, a.patient?.last_name].filter(Boolean).join(' ') || (a._patId ? `Patient #${a._patId}` : 'Unknown')}</td>
       <td style="font-size:12px;color:var(--muted2)">${cancelDate}<br><span style="color:var(--muted);font-size:11px;">(was ${apptDate})</span></td>
       <td style="font-size:12px;">${a.practitioner_name||'—'}</td>
       <td style="font-size:12px;color:var(--muted2);">${a.appointment_type_name||'—'}</td>
@@ -1300,6 +1352,92 @@ function buildTimeLost(appts, fromStr, toStr) {
 
   const note = document.getElementById('tl-note');
   if (note) note.textContent = `Capacity based on contracted weekly hours per practitioner × ${workDays} working days. Revenue estimated at $${RATE}/hr.`;
+}
+
+// ── CLASSES ────────────────────────────────────────
+let chartClasses = null;
+
+function buildClasses(appts, invoices) {
+  // Group appointments: a "class" appointment has max_attendees > 1
+  const classAppts = appts.filter(a => !isCancelled(a) && isGroup(a) && a.starts_at <= new Date().toISOString());
+
+  // Group by appointment_type_name + day-of-week + time slot
+  const classMap = {}; // key: "Class Name|HH:MM"
+  classAppts.forEach(a => {
+    const typeName = a.appointment_type_name || 'Unknown Class';
+    const dt = new Date(a.starts_at);
+    const timeStr = dt.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const dayStr = dt.toLocaleDateString('en-AU', { weekday: 'long' });
+    const sessionKey = a.starts_at.slice(0, 16); // unique session = exact datetime
+    const classKey = `${typeName}|${dayStr}|${timeStr}`;
+
+    if (!classMap[classKey]) {
+      classMap[classKey] = { name: typeName, day: dayStr, time: timeStr, sessions: new Set(), attendees: 0, revenue: 0 };
+    }
+    classMap[classKey].sessions.add(sessionKey);
+    classMap[classKey].attendees++;
+  });
+
+  // Match revenue from invoices — invoices linked to class appointments
+  const classApptIds = new Set(classAppts.map(a => String(a.id)));
+  invoices.forEach(inv => {
+    const apptId = String(inv.appointment?.links?.self?.split('/').pop() || inv.appointment_id || '');
+    if (!apptId || !classApptIds.has(apptId)) return;
+    // Find which class this invoice belongs to
+    const appt = classAppts.find(a => String(a.id) === apptId);
+    if (!appt) return;
+    const dt = new Date(appt.starts_at);
+    const timeStr = dt.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const dayStr = dt.toLocaleDateString('en-AU', { weekday: 'long' });
+    const classKey = `${appt.appointment_type_name || 'Unknown Class'}|${dayStr}|${timeStr}`;
+    if (classMap[classKey]) classMap[classKey].revenue += parseFloat(inv.total_amount || inv.amount || 0);
+  });
+
+  const classes = Object.values(classMap).map(c => ({ ...c, sessions: c.sessions.size, avg: c.sessions.size > 0 ? (c.attendees / c.sessions.size).toFixed(1) : 0 }));
+  const totalClasses = classes.reduce((s, c) => s + c.sessions, 0);
+  const totalAttendees = classes.reduce((s, c) => s + c.attendees, 0);
+  const totalRevenue = classes.reduce((s, c) => s + c.revenue, 0);
+
+  document.getElementById('cls-total').textContent = totalClasses;
+  document.getElementById('cls-attendees').textContent = totalAttendees;
+  document.getElementById('cls-revenue').textContent = '$' + totalRevenue.toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  // Table
+  const tbody = document.getElementById('cls-table-body');
+  if (!classes.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No classes found in this period</td></tr>';
+  } else {
+    tbody.innerHTML = classes
+      .sort((a, b) => b.attendees - a.attendees)
+      .map(c => `<tr>
+        <td class="fw">${c.name}</td>
+        <td style="font-size:12px;color:var(--muted2);">${c.day} ${c.time}</td>
+        <td class="mono">${c.sessions}</td>
+        <td class="mono c-sky">${c.attendees}</td>
+        <td class="mono">${c.avg}</td>
+        <td class="mono c-success">${c.revenue > 0 ? '$' + c.revenue.toLocaleString('en-AU', {minimumFractionDigits:2, maximumFractionDigits:2}) : '—'}</td>
+      </tr>`).join('');
+  }
+
+  // Timeslot popularity chart
+  const slotCounts = {};
+  classAppts.forEach(a => {
+    const dt = new Date(a.starts_at);
+    const label = dt.toLocaleDateString('en-AU', { weekday: 'short' }) + ' ' + dt.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', hour12: false });
+    slotCounts[label] = (slotCounts[label] || 0) + 1;
+  });
+  const sortedSlots = Object.entries(slotCounts).sort((a, b) => b[1] - a[1]);
+  const slotLabels = sortedSlots.map(([k]) => k);
+  const slotData = sortedSlots.map(([, v]) => v);
+
+  if (chartClasses) chartClasses.destroy();
+  if (slotLabels.length) {
+    chartClasses = new Chart(document.getElementById('chart-classes'), {
+      type: 'bar',
+      data: { labels: slotLabels, datasets: [{ label: 'Attendees', data: slotData, backgroundColor: 'rgba(135,206,235,0.8)', borderRadius: 4 }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#222' }, ticks: { color: '#666', font: { family: 'DM Sans', size: 11 }, maxRotation: 45 } }, y: { grid: { color: '#222' }, ticks: { color: '#666', font: { family: 'DM Sans', size: 11 } }, beginAtZero: true } } }
+    });
+  }
 }
 
 // ── TEAM MANAGEMENT ───────────────────────────────

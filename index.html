@@ -323,8 +323,8 @@
           <div class="table-header"><div class="table-title">Caseload, Attendance & Revenue by Practitioner</div></div>
           <table>
             <thead><tr>
-              <th>Practitioner</th><th>Appointments</th><th>Attended</th><th>DNA</th>
-              <th>Cancellations</th><th>Attendance Rate</th><th>Note Completion</th><th>New Patients</th>
+              <th>Practitioner</th><th>Active Appts</th><th>Attended</th><th>DNA</th>
+              <th>Cancellations</th><th>Attendance Rate</th><th>Notes Done</th><th>New Patients</th>
             </tr></thead>
             <tbody id="prac-table-body"><tr><td colspan="8" class="empty">Load data to view</td></tr></tbody>
           </table>
@@ -418,6 +418,7 @@
           <div class="chart-header"><div><div class="chart-title">Daily Utilisation</div><div class="chart-sub">Attended vs open slots over period</div></div></div>
           <div style="height:220px;"><canvas id="chart-timelost"></canvas></div>
         </div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:12px;" id="tl-note"></div>
         <div class="table-card">
           <div class="table-header"><div class="table-title">Utilisation by Practitioner (this period)</div></div>
           <table>
@@ -431,7 +432,10 @@
       <div class="tab-content" id="tab-team">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
           <div class="section-header" style="margin-bottom:0;">Team Members</div>
-          <button onclick="openAddTeamMember()" style="background:var(--sky);color:#0f0f0f;border:none;border-radius:8px;padding:9px 16px;font-size:13px;font-family:'DM Sans',sans-serif;font-weight:500;cursor:pointer;">+ Add Member</button>
+          <div style="display:flex;gap:8px;">
+            <button onclick="importPractitioners()" style="background:transparent;color:var(--sky);border:1px solid var(--sky);border-radius:8px;padding:9px 16px;font-size:13px;font-family:'DM Sans',sans-serif;font-weight:500;cursor:pointer;">↓ Import from Cliniko</button>
+            <button onclick="openAddTeamMember()" style="background:var(--sky);color:#0f0f0f;border:none;border-radius:8px;padding:9px 16px;font-size:13px;font-family:'DM Sans',sans-serif;font-weight:500;cursor:pointer;">+ Add Member</button>
+          </div>
         </div>
         <div id="team-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;"></div>
         <div id="team-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:200;align-items:center;justify-content:center;">
@@ -587,19 +591,35 @@ async function loadDashboard() {
     const apptData = await apiGet('get_appointments_range', { from: fromStr, to: toStr });
     // Enrich appointments with practitioner names from lookup
     allAppointments = (apptData.appointments || []).map(a => {
+      // Practitioner name from lookup
       const pracId = a.practitioner?.links?.self?.split('/').pop();
-      return { ...a, practitioner_name: pracId ? (pracLookup[pracId] || 'Unknown') : 'Unknown' };
+      const pracName = pracId ? (pracLookup[pracId] || null) : null;
+      // Patient name from embedded fields (Cliniko returns patient object on appointment)
+      const firstName = a.patient?.first_name || '';
+      const lastName = a.patient?.last_name || '';
+      const patientName = [firstName, lastName].filter(Boolean).join(' ') || null;
+      // Appointment type name
+      const apptTypeName = a.appointment_type?.name || a.appointment_type_name || null;
+      return { ...a, practitioner_name: pracName, patient_name: patientName, appointment_type_name: apptTypeName };
     });
 
     showLoading('Fetching new patients...');
     const patientData = await apiGet('get_new_patients', { from: fromStr, to: toStr });
-    allNewPatients = patientData.patients || [];
+    allNewPatients = (patientData.patients || []).map(p => ({
+      ...p,
+      full_name: [p.first_name, p.last_name].filter(Boolean).join(' '),
+      referral_source: p.referral_source || p.referred_by || null,
+    }));
 
-    showLoading('Fetching invoices (all time for quarter)...');
+    showLoading('Fetching invoices...');
     const invoiceData = await apiGet('get_invoices_range', { from: fromStr, to: toStr });
+    // Build appointment ID → practitioner lookup for invoice matching
+    const apptIdToPrac = {};
+    allAppointments.forEach(a => { if (a.id) apptIdToPrac[String(a.id)] = a.practitioner_name; });
     allInvoices = (invoiceData.invoices || []).map(inv => {
-      // Try to match invoice to appointment for practitioner
-      return inv;
+      const apptId = String(inv.appointment?.links?.self?.split('/').pop() || inv.appointment_id || '');
+      const pracName = apptId ? (apptIdToPrac[apptId] || null) : null;
+      return { ...inv, practitioner_name: pracName };
     });
 
     showLoading('Building dashboard...');
@@ -630,7 +650,8 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   const pending = active.filter(isPending).length;
   const completed = attended + dna;
   const attendanceRate = completed > 0 ? Math.round((attended / completed) * 100) : 0;
-  const cancelRate = appts.length > 0 ? Math.round((cancelled.length / appts.length) * 100) : 0;
+  // Cancellation rate = cancelled / (completed + cancelled) — excludes pending
+  const cancelRate = (completed + cancelled.length) > 0 ? Math.round((cancelled.length / (completed + cancelled.length)) * 100) : 0;
 
   // Note completion — % of attended that have notes
   const noteCompletion = attended > 0 ? Math.round((active.filter(a => isAttended(a) && a.treatment_note_status >= 90).length / attended) * 100) : 0;
@@ -639,18 +660,16 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   const attendedPatientIds = new Set(active.filter(isAttended).map(a => a.patient?.links?.self?.split('/').pop()).filter(Boolean));
   const avgVisits = attendedPatientIds.size > 0 ? (attended / attendedPatientIds.size).toFixed(1) : '0';
 
-  // Rebooking rate — patients who had another appointment booked within 2 days of their last attended
+  // Rebooking rate — attended patients who have at least one more non-cancelled appointment after their last attended
+  const todayStr = fmtDate(new Date());
   let rebookCount = 0;
   attendedPatientIds.forEach(patId => {
-    const patAppts = appts.filter(a => a.patient?.links?.self?.split('/').pop() === patId).sort((a,b) => new Date(a.starts_at) - new Date(b.starts_at));
-    for (let i = 0; i < patAppts.length - 1; i++) {
-      const curr = patAppts[i];
-      const next = patAppts[i+1];
-      if (isAttended(curr) && !isCancelled(next)) {
-        const daysDiff = (new Date(next.starts_at) - new Date(curr.starts_at)) / (1000*60*60*24);
-        if (daysDiff <= 2) { rebookCount++; break; }
-      }
-    }
+    const patAppts = appts.filter(a => a.patient?.links?.self?.split('/').pop() === patId);
+    const lastAttended = patAppts.filter(isAttended).sort((a,b) => new Date(b.starts_at) - new Date(a.starts_at))[0];
+    if (!lastAttended) return;
+    // Has any non-cancelled appt after the last attended
+    const hasNext = patAppts.some(a => !isCancelled(a) && a.starts_at > lastAttended.starts_at);
+    if (hasNext) rebookCount++;
   });
   const rebookRate = attendedPatientIds.size > 0 ? Math.round((rebookCount / attendedPatientIds.size) * 100) : 0;
 
@@ -747,13 +766,28 @@ function buildRevenueChart(invoices, fromStr, toStr) {
 // ── TABLES ────────────────────────────────────────
 function buildPracTable(appts, newPatients, invoices) {
   const pracs = {};
+  // Include ALL appointments (active + cancelled) for full picture
   appts.forEach(a => {
-    const name = a.practitioner_name || 'Unknown';
+    const name = a.practitioner_name || '(no practitioner)';
     if (!pracs[name]) pracs[name] = {total:0, attended:0, dna:0, cancelled:0, noted:0, newPts:0};
+    if (isCancelled(a)) { pracs[name].cancelled++; return; }
     pracs[name].total++;
     if (isAttended(a)) { pracs[name].attended++; if (a.treatment_note_status >= 90) pracs[name].noted++; }
     else if (isDNA(a)) pracs[name].dna++;
-    else if (isCancelled(a)) pracs[name].cancelled++;
+  });
+  // New patients — match by practitioner name via their first appointment
+  newPatients.forEach(p => {
+    // Find any appointment for this patient
+    const patId = p.id ? String(p.id) : null;
+    if (!patId) return;
+    const appt = appts.find(a => {
+      const aPatId = a.patient?.links?.self?.split('/').pop();
+      return aPatId === patId && !isCancelled(a);
+    });
+    if (appt) {
+      const name = appt.practitioner_name || '(no practitioner)';
+      if (pracs[name]) pracs[name].newPts++;
+    }
   });
 
   const maxTotal = Math.max(...Object.values(pracs).map(p=>p.total), 1);
@@ -794,7 +828,10 @@ function buildPracTable(appts, newPatients, invoices) {
 
 function buildReferralList(patients) {
   const sources = {};
-  patients.forEach(p => { const s = p.referral_source || 'Unknown'; sources[s] = (sources[s]||0)+1; });
+  patients.forEach(p => {
+    const s = p.referral_source || p.referred_by || p.patient_referred_by || null;
+    if (s && s.trim()) { sources[s.trim()] = (sources[s.trim()]||0)+1; }
+  });
   const list = document.getElementById('referral-list');
   const sorted = Object.entries(sources).sort((a,b)=>b[1]-a[1]);
   const max = sorted[0]?.[1] || 1;
@@ -903,11 +940,9 @@ function buildCancelTable(cancelled, allAppts) {
 
 function buildRevenueTable(invoices, appts) {
   const byPrac = {};
-  // Map invoices to practitioners via appointments
+  // Invoices already have practitioner_name enriched in loadDashboard
   invoices.forEach(inv => {
-    const apptId = inv.appointment?.links?.self?.split('/').pop();
-    const appt = appts.find(a => a.id === apptId);
-    const name = appt?.practitioner_name || 'Unknown';
+    const name = inv.practitioner_name || '(unmatched)';
     if (!byPrac[name]) byPrac[name] = { count: 0, total: 0 };
     byPrac[name].count++;
     byPrac[name].total += parseFloat(inv.total_amount || inv.amount || 0);
@@ -1009,39 +1044,56 @@ const RATE_PER_HOUR = 150;
 const HOURS_PER_DAY = 8;
 
 function buildTimeLost(appts, fromStr, toStr) {
-  const active = appts.filter(a => !isCancelled(a));
-  const attended = active.filter(isAttended).length;
-
   // Count working days in range
   let workDays = 0;
   let d = new Date(fromStr + 'T00:00:00');
   const end = new Date(toStr + 'T00:00:00');
   while (d <= end) { if (d.getDay() !== 0 && d.getDay() !== 6) workDays++; d.setDate(d.getDate()+1); }
-  const totalSlots = workDays * HOURS_PER_DAY * 4; // rough: 4 practitioners
-  const openSlots = Math.max(0, totalSlots - attended);
-  const hoursLost = (openSlots * 1).toFixed(1);
-  const revLost = (openSlots * RATE_PER_HOUR).toFixed(0);
+
+  // Identify active practitioners from data (ignore null/unmatched)
+  const pracSet = new Set(appts.map(a => a.practitioner_name).filter(n => n && n !== '(no practitioner)'));
+  const numPracs = Math.max(pracSet.size, 1);
+
+  // Per-practitioner: capacity = workDays × HOURS_PER_DAY appointments
+  // Total capacity across all practitioners
+  const capacityPerPrac = workDays * HOURS_PER_DAY;
+  const totalCapacity = capacityPerPrac * numPracs;
+
+  // Count attended per practitioner
+  const pracData = {};
+  pracSet.forEach(n => pracData[n] = { attended:0, dna:0, cancelled:0 });
+  appts.forEach(a => {
+    const name = a.practitioner_name;
+    if (!name || !pracData[name]) return;
+    if (isAttended(a)) pracData[name].attended++;
+    else if (isDNA(a)) pracData[name].dna++;
+    else if (isCancelled(a)) pracData[name].cancelled++;
+  });
+
+  const totalAttended = Object.values(pracData).reduce((s,p) => s + p.attended, 0);
+  const openSlots = Math.max(0, totalCapacity - totalAttended);
+  const hoursLost = openSlots; // 1 slot = 1 hour
+  const revLost = openSlots * RATE_PER_HOUR;
 
   document.getElementById('tl-slots').textContent = openSlots;
   document.getElementById('tl-hours').textContent = hoursLost + 'h';
-  document.getElementById('tl-rev').textContent = '$' + parseInt(revLost).toLocaleString();
+  document.getElementById('tl-rev').textContent = '$' + revLost.toLocaleString();
 
-  // Chart — daily attended vs total capacity
+  // Chart — daily attended vs open slots (all practitioners combined)
   const days = {};
   let d2 = new Date(fromStr + 'T00:00:00');
   while (d2 <= end) {
     const key = fmtDate(d2);
     const isWeekend = d2.getDay() === 0 || d2.getDay() === 6;
-    days[key] = { capacity: isWeekend ? 0 : HOURS_PER_DAY * 4, attended: 0 };
+    days[key] = { capacity: isWeekend ? 0 : HOURS_PER_DAY * numPracs, attended: 0 };
     d2.setDate(d2.getDate()+1);
   }
-  active.filter(isAttended).forEach(a => {
+  appts.filter(isAttended).forEach(a => {
     const day = a.starts_at?.slice(0,10);
-    if (days[day]) days[day].attended++;
+    if (days[day] && a.practitioner_name && pracData[a.practitioner_name] !== undefined) days[day].attended++;
   });
 
   const labels = Object.keys(days).map(k => new Date(k+'T00:00:00').toLocaleDateString('en-AU',{day:'numeric',month:'short'}));
-  const capData = Object.values(days).map(d => d.capacity);
   const attData = Object.values(days).map(d => d.attended);
   const openData = Object.values(days).map(d => Math.max(0, d.capacity - d.attended));
 
@@ -1055,20 +1107,12 @@ function buildTimeLost(appts, fromStr, toStr) {
     options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#888',font:{family:'DM Sans',size:11}}}}, scales:{x:{stacked:true,grid:{color:'#222'},ticks:{color:'#666',font:{family:'DM Sans',size:10},maxRotation:45}},y:{stacked:true,grid:{color:'#222'},ticks:{color:'#666',font:{family:'DM Sans',size:11}}}}}
   });
 
-  // Table by practitioner
-  const pracs = {};
-  appts.forEach(a => {
-    const name = a.practitioner_name || 'Unknown';
-    if (!pracs[name]) pracs[name] = { attended:0, dna:0, cancelled:0 };
-    if (isAttended(a)) pracs[name].attended++;
-    else if (isDNA(a)) pracs[name].dna++;
-    else if (isCancelled(a)) pracs[name].cancelled++;
-  });
+  // Table by practitioner — capacity per practitioner = workDays × HOURS_PER_DAY
   const tbody = document.getElementById('tl-table-body');
-  const slotsPerPrac = workDays * HOURS_PER_DAY;
-  tbody.innerHTML = Object.entries(pracs).sort((a,b)=>b[1].attended-a[1].attended).map(([name,d]) => {
-    const util = slotsPerPrac > 0 ? Math.round((d.attended/slotsPerPrac)*100) : 0;
-    const lost = Math.max(0, slotsPerPrac - d.attended);
+  tbody.innerHTML = Object.entries(pracData).sort((a,b)=>b[1].attended-a[1].attended).map(([name,d]) => {
+    const cap = capacityPerPrac;
+    const util = cap > 0 ? Math.round((d.attended/cap)*100) : 0;
+    const lost = Math.max(0, cap - d.attended);
     const lostRev = (lost * RATE_PER_HOUR).toLocaleString();
     const utilColor = util >= 80 ? 'var(--success)' : util >= 60 ? 'var(--warning)' : 'var(--danger)';
     return `<tr>
@@ -1080,6 +1124,10 @@ function buildTimeLost(appts, fromStr, toStr) {
       <td class="mono c-danger">$${lostRev}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="6" class="empty">No data</td></tr>';
+
+  // Show note about assumptions
+  const note = document.getElementById('tl-note');
+  if (note) note.textContent = `Based on ${numPracs} practitioner${numPracs!==1?'s':''}, ${HOURS_PER_DAY}h/day capacity, ${workDays} working days. Est. revenue at $${RATE_PER_HOUR}/hr.`;
 }
 
 // ── TEAM MANAGEMENT ───────────────────────────────
@@ -1200,6 +1248,26 @@ function renderTeam() {
       ${m.mentoring ? `<details style="margin-top:8px;"><summary style="font-size:12px;color:var(--muted);cursor:pointer;list-style:none;">▸ Mentoring notes</summary><div style="margin-top:8px;padding:10px;background:var(--surface2);border-radius:8px;font-size:12px;color:var(--text);">${m.mentoring}</div></details>` : ''}
     </div>`;
   }).join('');
+}
+
+// ── IMPORT PRACTITIONERS FROM CLINIKO ────────────────
+async function importPractitioners() {
+  if (!token) { alert('Please log in first.'); return; }
+  try {
+    const data = await apiGet('get_practitioners');
+    const lookup = data.practitioners || {};
+    const members = getTeamMembers();
+    let added = 0;
+    Object.entries(lookup).forEach(([id, nameVal]) => {
+      const name = typeof nameVal === 'string' ? nameVal : [nameVal.first_name, nameVal.last_name].filter(Boolean).join(' ');
+      if (members.find(m => m.clinikoId === id || m.name === name)) return;
+      members.push({ id: Date.now() + Math.random(), clinikoId: id, name, role: 'Practitioner', birthday:'', emergency:'', firstaid:'', cpr:'', goals:'', working:'', certs:'', mentoring:'' });
+      added++;
+    });
+    saveTeamMembers(members);
+    renderTeam();
+    alert(added === 0 ? 'All practitioners already imported.' : `Imported ${added} practitioner${added!==1?'s':''}. Fill in their details below.`);
+  } catch(e) { alert('Could not import: ' + e.message); }
 }
 
 // ── INIT NEW TABS ─────────────────────────────────

@@ -634,10 +634,21 @@ async function loadDashboard() {
 }
 
 // ── ATTENDANCE HELPERS ────────────────────────────
-function isAttended(a) { return !a.did_not_arrive && (a.treatment_note_status > 0); }
-function isDNA(a) { return a.did_not_arrive === true; }
+// Cliniko: group/class appointments have appointment_type.max_attendees > 1
+// or they may have patient_count > 1 on the appointment itself
+function isGroup(a) {
+  return (a.appointment_type?.max_attendees > 1) || (a.max_attendees > 1) || false;
+}
+// Attended: not DNA, not cancelled, AND (has a note started OR is a group/class appointment)
+function isAttended(a) {
+  if (a.did_not_arrive || a.cancelled_at) return false;
+  return a.treatment_note_status > 0 || isGroup(a);
+}
+// DNA: explicitly marked did_not_arrive and not cancelled
+function isDNA(a) { return a.did_not_arrive === true && !a.cancelled_at; }
+// Cancelled: has a cancelled_at timestamp (patient or admin cancelled)
 function isCancelled(a) { return !!a.cancelled_at; }
-function isPending(a) { return !a.did_not_arrive && !a.cancelled_at && a.treatment_note_status === 0; }
+// No more "pending" — every non-cancelled appt either attended or DNA
 
 // ── PROCESS ALL DATA ──────────────────────────────
 function processAll(appts, newPatients, invoices, fromStr, toStr) {
@@ -647,11 +658,12 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   const total = active.length;
   const attended = active.filter(isAttended).length;
   const dna = active.filter(isDNA).length;
-  const pending = active.filter(isPending).length;
+  // No pending — every active appt is attended or DNA
   const completed = attended + dna;
   const attendanceRate = completed > 0 ? Math.round((attended / completed) * 100) : 0;
-  // Cancellation rate = cancelled / (completed + cancelled) — excludes pending
-  const cancelRate = (completed + cancelled.length) > 0 ? Math.round((cancelled.length / (completed + cancelled.length)) * 100) : 0;
+  // Cancellation rate = cancelled / (all booked = completed + cancelled)
+  const totalBooked = completed + cancelled.length;
+  const cancelRate = totalBooked > 0 ? Math.round((cancelled.length / totalBooked) * 100) : 0;
 
   // Note completion — % of attended that have notes
   const noteCompletion = attended > 0 ? Math.round((active.filter(a => isAttended(a) && a.treatment_note_status >= 90).length / attended) * 100) : 0;
@@ -660,16 +672,13 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   const attendedPatientIds = new Set(active.filter(isAttended).map(a => a.patient?.links?.self?.split('/').pop()).filter(Boolean));
   const avgVisits = attendedPatientIds.size > 0 ? (attended / attendedPatientIds.size).toFixed(1) : '0';
 
-  // Rebooking rate — attended patients who have at least one more non-cancelled appointment after their last attended
-  const todayStr = fmtDate(new Date());
+  // Rebooking rate: of patients who attended, how many have a future (upcoming) non-cancelled appointment?
+  const nowISO = new Date().toISOString();
   let rebookCount = 0;
   attendedPatientIds.forEach(patId => {
     const patAppts = appts.filter(a => a.patient?.links?.self?.split('/').pop() === patId);
-    const lastAttended = patAppts.filter(isAttended).sort((a,b) => new Date(b.starts_at) - new Date(a.starts_at))[0];
-    if (!lastAttended) return;
-    // Has any non-cancelled appt after the last attended
-    const hasNext = patAppts.some(a => !isCancelled(a) && a.starts_at > lastAttended.starts_at);
-    if (hasNext) rebookCount++;
+    const hasFuture = patAppts.some(a => !isCancelled(a) && a.starts_at > nowISO);
+    if (hasFuture) rebookCount++;
   });
   const rebookRate = attendedPatientIds.size > 0 ? Math.round((rebookCount / attendedPatientIds.size) * 100) : 0;
 
@@ -682,10 +691,10 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   document.getElementById('stat-attendance').textContent = attendanceRate + '%';
   document.getElementById('stat-attendance-sub').textContent = `${attended} attended of ${completed} completed`;
   document.getElementById('stat-dna').textContent = dna;
-  document.getElementById('stat-dna-sub').textContent = `${dna} DNA · ${pending} pending`;
+  document.getElementById('stat-dna-sub').textContent = `${dna} did not arrive`;
   document.getElementById('stat-new').textContent = newPatients.length;
   document.getElementById('stat-cancel').textContent = cancelRate + '%';
-  document.getElementById('stat-cancel-sub').textContent = `${cancelled.length} cancellations`;
+  document.getElementById('stat-cancel-sub').textContent = `${cancelled.length} of ${totalBooked} booked`;
   document.getElementById('stat-notes').textContent = noteCompletion + '%';
   document.getElementById('stat-notes-sub').textContent = `treatment notes completed`;
   document.getElementById('stat-rebook').textContent = rebookRate + '%';
@@ -698,7 +707,7 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
 
   // Build charts and tables
   buildApptsChart(active, fromStr, toStr);
-  buildDnaChart(attended, dna, pending);
+  buildDnaChart(attended, dna);
   buildReferralList(newPatients);
   buildDnaList(active);
   buildPracTable(active, newPatients, invoices);
@@ -714,14 +723,12 @@ function buildApptsChart(appts, fromStr, toStr) {
   const days = {};
   let d = new Date(fromStr + 'T00:00:00');
   const end = new Date(toStr + 'T00:00:00');
-  while (d <= end) { days[fmtDate(d)] = {attended:0, dna:0, pending:0}; d.setDate(d.getDate()+1); }
+  while (d <= end) { days[fmtDate(d)] = {attended:0, dna:0}; d.setDate(d.getDate()+1); }
   appts.forEach(a => {
     const day = a.starts_at?.slice(0,10);
-    if (days[day]) {
-      if (isAttended(a)) days[day].attended++;
-      else if (isDNA(a)) days[day].dna++;
-      else days[day].pending++;
-    }
+    if (!days[day] || isCancelled(a)) return;
+    if (isAttended(a)) days[day].attended++;
+    else if (isDNA(a)) days[day].dna++;
   });
   const labels = Object.keys(days).map(d => new Date(d+'T00:00:00').toLocaleDateString('en-AU',{day:'numeric',month:'short'}));
   if (chartAppts) chartAppts.destroy();
@@ -730,17 +737,16 @@ function buildApptsChart(appts, fromStr, toStr) {
     data: { labels, datasets: [
       { label:'Attended', data:Object.values(days).map(d=>d.attended), backgroundColor:'rgba(135,206,235,0.8)', borderRadius:4, stack:'a' },
       { label:'DNA', data:Object.values(days).map(d=>d.dna), backgroundColor:'rgba(248,113,113,0.7)', borderRadius:4, stack:'a' },
-      { label:'Pending', data:Object.values(days).map(d=>d.pending), backgroundColor:'rgba(100,100,100,0.4)', borderRadius:4, stack:'a' },
     ]},
     options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#888',font:{family:'DM Sans',size:11}}}}, scales:{x:{stacked:true,grid:{color:'#222'},ticks:{color:'#666',font:{family:'DM Sans',size:10},maxRotation:45}},y:{stacked:true,grid:{color:'#222'},ticks:{color:'#666',font:{family:'DM Sans',size:11}}}}}
   });
 }
 
-function buildDnaChart(attended, dna, pending) {
+function buildDnaChart(attended, dna) {
   if (chartDna) chartDna.destroy();
   chartDna = new Chart(document.getElementById('chart-dna'), {
     type: 'doughnut',
-    data: { labels:['Attended','DNA','Pending'], datasets:[{ data:[attended, dna, pending], backgroundColor:['rgba(135,206,235,0.8)','rgba(248,113,113,0.7)','rgba(100,100,100,0.4)'], borderWidth:0 }]},
+    data: { labels:['Attended','DNA'], datasets:[{ data:[attended, dna], backgroundColor:['rgba(135,206,235,0.8)','rgba(248,113,113,0.7)'], borderWidth:0 }]},
     options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom',labels:{color:'#888',font:{family:'DM Sans',size:11},padding:12}}}, cutout:'65%' }
   });
 }
@@ -1040,8 +1046,15 @@ function generateDNAActions(dnAppts) {
 
 // ── TIME LOST ──────────────────────────────────────
 let chartTimeLost = null;
-const RATE_PER_HOUR = 150;
-const HOURS_PER_DAY = 8;
+const RATE_PER_HOUR = 170;
+
+// Contracted weekly clinical hours per practitioner (matched on first name)
+const PRAC_WEEKLY_HOURS = { braeden: 30, sierra: 28, meg: 17, sharon: 5, samadi: 5 };
+function getPracWeeklyHours(name) {
+  if (!name) return null;
+  const key = name.trim().toLowerCase().split(' ')[0];
+  return PRAC_WEEKLY_HOURS[key] ?? null;
+}
 
 function buildTimeLost(appts, fromStr, toStr) {
   // Count working days in range
@@ -1050,18 +1063,16 @@ function buildTimeLost(appts, fromStr, toStr) {
   const end = new Date(toStr + 'T00:00:00');
   while (d <= end) { if (d.getDay() !== 0 && d.getDay() !== 6) workDays++; d.setDate(d.getDate()+1); }
 
-  // Identify active practitioners from data (ignore null/unmatched)
+  // Identify practitioners from data (ignore null/unmatched)
   const pracSet = new Set(appts.map(a => a.practitioner_name).filter(n => n && n !== '(no practitioner)'));
-  const numPracs = Math.max(pracSet.size, 1);
-
-  // Per-practitioner: capacity = workDays × HOURS_PER_DAY appointments
-  // Total capacity across all practitioners
-  const capacityPerPrac = workDays * HOURS_PER_DAY;
-  const totalCapacity = capacityPerPrac * numPracs;
-
-  // Count attended per practitioner
+  // Per-practitioner capacity: weeklyHours ÷ 5 days × workDays
   const pracData = {};
-  pracSet.forEach(n => pracData[n] = { attended:0, dna:0, cancelled:0 });
+  pracSet.forEach(name => {
+    const wkHrs = getPracWeeklyHours(name);
+    const capacity = wkHrs != null ? Math.round((wkHrs / 5) * workDays) : null;
+    pracData[name] = { attended: 0, dna: 0, cancelled: 0, capacity, wkHrs };
+  });
+
   appts.forEach(a => {
     const name = a.practitioner_name;
     if (!name || !pracData[name]) return;
@@ -1070,22 +1081,27 @@ function buildTimeLost(appts, fromStr, toStr) {
     else if (isCancelled(a)) pracData[name].cancelled++;
   });
 
-  const totalAttended = Object.values(pracData).reduce((s,p) => s + p.attended, 0);
+  // Totals — only include practitioners with known capacity
+  let totalCapacity = 0, totalAttended = 0;
+  Object.values(pracData).forEach(p => {
+    if (p.capacity != null) { totalCapacity += p.capacity; totalAttended += p.attended; }
+  });
   const openSlots = Math.max(0, totalCapacity - totalAttended);
-  const hoursLost = openSlots; // 1 slot = 1 hour
   const revLost = openSlots * RATE_PER_HOUR;
 
   document.getElementById('tl-slots').textContent = openSlots;
-  document.getElementById('tl-hours').textContent = hoursLost + 'h';
+  document.getElementById('tl-hours').textContent = openSlots + 'h';
   document.getElementById('tl-rev').textContent = '$' + revLost.toLocaleString();
 
-  // Chart — daily attended vs open slots (all practitioners combined)
+  // Chart — daily capacity = sum of all contracted weekly hours ÷ 5
+  const knownWeeklyTotal = Object.values(PRAC_WEEKLY_HOURS).reduce((s, h) => s + h, 0);
+  const dailyCapacity = knownWeeklyTotal / 5;
   const days = {};
   let d2 = new Date(fromStr + 'T00:00:00');
   while (d2 <= end) {
     const key = fmtDate(d2);
     const isWeekend = d2.getDay() === 0 || d2.getDay() === 6;
-    days[key] = { capacity: isWeekend ? 0 : HOURS_PER_DAY * numPracs, attended: 0 };
+    days[key] = { capacity: isWeekend ? 0 : dailyCapacity, attended: 0 };
     d2.setDate(d2.getDate()+1);
   }
   appts.filter(isAttended).forEach(a => {
@@ -1107,27 +1123,26 @@ function buildTimeLost(appts, fromStr, toStr) {
     options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#888',font:{family:'DM Sans',size:11}}}}, scales:{x:{stacked:true,grid:{color:'#222'},ticks:{color:'#666',font:{family:'DM Sans',size:10},maxRotation:45}},y:{stacked:true,grid:{color:'#222'},ticks:{color:'#666',font:{family:'DM Sans',size:11}}}}}
   });
 
-  // Table by practitioner — capacity per practitioner = workDays × HOURS_PER_DAY
+  // Table by practitioner
   const tbody = document.getElementById('tl-table-body');
-  tbody.innerHTML = Object.entries(pracData).sort((a,b)=>b[1].attended-a[1].attended).map(([name,d]) => {
-    const cap = capacityPerPrac;
-    const util = cap > 0 ? Math.round((d.attended/cap)*100) : 0;
-    const lost = Math.max(0, cap - d.attended);
-    const lostRev = (lost * RATE_PER_HOUR).toLocaleString();
-    const utilColor = util >= 80 ? 'var(--success)' : util >= 60 ? 'var(--warning)' : 'var(--danger)';
+  tbody.innerHTML = Object.entries(pracData).sort((a,b) => b[1].attended - a[1].attended).map(([name, p]) => {
+    const util = (p.capacity != null && p.capacity > 0) ? Math.round((p.attended / p.capacity) * 100) : null;
+    const lost = p.capacity != null ? Math.max(0, p.capacity - p.attended) : null;
+    const lostRev = lost != null ? '$' + (lost * RATE_PER_HOUR).toLocaleString() : '—';
+    const utilDisplay = util != null ? util + '%' : '—';
+    const utilColor = util == null ? 'var(--muted)' : util >= 80 ? 'var(--success)' : util >= 60 ? 'var(--warning)' : 'var(--danger)';
     return `<tr>
-      <td class="fw">${name}</td>
-      <td class="mono c-sky">${d.attended}</td>
-      <td class="mono c-danger">${d.dna}</td>
-      <td class="mono c-warning">${d.cancelled}</td>
-      <td><span style="color:${utilColor};font-family:'DM Mono',monospace">${util}%</span></td>
-      <td class="mono c-danger">$${lostRev}</td>
+      <td class="fw">${name}<span style="font-size:11px;color:var(--muted);margin-left:6px;">${p.wkHrs != null ? p.wkHrs + 'h/wk' : '?'}</span></td>
+      <td class="mono c-sky">${p.attended}</td>
+      <td class="mono c-danger">${p.dna}</td>
+      <td class="mono c-warning">${p.cancelled}</td>
+      <td><span style="color:${utilColor};font-family:'DM Mono',monospace">${utilDisplay}</span></td>
+      <td class="mono c-danger">${lostRev}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="6" class="empty">No data</td></tr>';
 
-  // Show note about assumptions
   const note = document.getElementById('tl-note');
-  if (note) note.textContent = `Based on ${numPracs} practitioner${numPracs!==1?'s':''}, ${HOURS_PER_DAY}h/day capacity, ${workDays} working days. Est. revenue at $${RATE_PER_HOUR}/hr.`;
+  if (note) note.textContent = `Capacity based on contracted weekly hours per practitioner × ${workDays} working days. Revenue estimated at $${RATE_PER_HOUR}/hr.`;
 }
 
 // ── TEAM MANAGEMENT ───────────────────────────────

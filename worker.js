@@ -14,11 +14,10 @@ export default {
       return new Response('', { headers: corsHeaders });
     }
 
-    const DASH_EMAIL    = env.DASHBOARD_EMAIL    || 'admin@beachsideep.com.au';
+    const DASH_EMAIL = env.DASHBOARD_EMAIL || 'admin@beachsideep.com.au';
     const DASH_PASSWORD = env.DASHBOARD_PASSWORD || 'Theo123*';
-    const CLINIKO_KEY   = env.CLINIKO_API_KEY    || 'MS0xOTM4NzEyOTY5NjA5MjIyMjk4LW5oZXVTQVYxVTIzRVdVMXdtQUR1NFRiYlMzMHY2SHR0-au2';
+    const CLINIKO_KEY = env.CLINIKO_API_KEY || 'MS0xOTM4NzEyOTY5NjA5MjIyMjk4LW5oZXVTQVYxVTIzRVdVMXdtQUR1NFRiYlMzMHY2SHR0-au2';
 
-    // ── AUTH ─────────────────────────────────────────
     if (url.pathname === '/auth/login') {
       try {
         const body = await request.json();
@@ -32,7 +31,6 @@ export default {
       }
     }
 
-    // ── TOKEN CHECK ──────────────────────────────────
     const authHeader = request.headers.get('Authorization') || '';
     const token = authHeader.replace('Bearer ', '');
     if (!token) {
@@ -45,7 +43,8 @@ export default {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: corsHeaders });
     }
 
-    const creds = btoa(CLINIKO_KEY + ':');
+    const API_KEY = CLINIKO_KEY;
+    const creds = btoa(API_KEY + ':');
     const authHeaders = {
       'Authorization': 'Basic ' + creds,
       'Accept': 'application/json',
@@ -53,89 +52,104 @@ export default {
       'User-Agent': 'BEP-Dashboard/1.0 (admin@beachsideep.com.au)',
     };
 
-    // Fetch a single Cliniko page
     async function clinikoGet(path) {
       const res = await fetch(`${CLINIKO_BASE}/${path}`, { headers: authHeaders });
-      if (!res.ok) throw new Error(`Cliniko ${res.status}: ${path}`);
       return res.json();
-    }
-
-    // Fetch all pages, stopping when predicate(lastItem) returns false
-    async function clinikoGetAll(path, stopWhen, maxPages = 50) {
-      let items = [];
-      let page = 1;
-      while (page <= maxPages) {
-        const sep = path.includes('?') ? '&' : '?';
-        const data = await clinikoGet(`${path}${sep}per_page=100&page=${page}`);
-        const key = Object.keys(data).find(k => Array.isArray(data[k]));
-        const batch = key ? data[key] : [];
-        if (!batch.length) break;
-        items = items.concat(batch);
-        const last = batch[batch.length - 1];
-        if (batch.length < 100 || !data.links?.next || (stopWhen && !stopWhen(last))) break;
-        page++;
-      }
-      return items;
     }
 
     const action = url.searchParams.get('action') || '';
 
-    // ── GET PRACTITIONERS ────────────────────────────
+    // ── GET ALL PRACTITIONERS (cached lookup) ─────────
     if (action === 'get_practitioners') {
       const data = await clinikoGet('practitioners?per_page=100');
+      const practitioners = data.practitioners || [];
       const lookup = {};
-      (data.practitioners || []).forEach(p => {
-        lookup[p.id] = `${p.first_name} ${p.last_name}`.trim();
-      });
+      practitioners.forEach(p => { lookup[p.id] = `${p.first_name} ${p.last_name}`; });
       return new Response(JSON.stringify({ practitioners: lookup }), { headers: corsHeaders });
 
-    // ── GET APPOINTMENTS IN DATE RANGE ───────────────
+    // ── GET APPOINTMENTS IN DATE RANGE ────────────────
     } else if (action === 'get_appointments_range') {
       const from = url.searchParams.get('from') || '';
-      const to   = url.searchParams.get('to')   || '';
-      if (!from || !to) {
-        return new Response(JSON.stringify({ error: 'from and to required' }), { status: 400, headers: corsHeaders });
+      const to = url.searchParams.get('to') || '';
+
+      // Get total to find last page
+      const countData = await clinikoGet(`appointments?per_page=1&page=1`);
+      const total = countData.total_entries || 0;
+      const totalPages = Math.ceil(total / 100);
+
+      let allAppts = [];
+      const startPage = Math.max(1, totalPages);
+      const endPage = Math.max(1, totalPages - 20);
+
+      for (let page = startPage; page >= endPage; page--) {
+        const data = await clinikoGet(`appointments?sort=starts_at&order=asc&per_page=100&page=${page}`);
+        const appts = data.appointments || [];
+
+        // Include in-range AND cancelled appointments (cancelled_at may be outside range but appt was in range)
+        const inRange = appts.filter(a => {
+          const apptDate = a.starts_at?.slice(0,10);
+          const cancelDate = a.cancelled_at?.slice(0,10);
+          // Include if appointment was in range OR was cancelled and the original appt was in range
+          return (apptDate >= from && apptDate <= to) ||
+                 (cancelDate >= from && cancelDate <= to && apptDate >= from);
+        });
+
+        allAppts = allAppts.concat(inRange);
+        const firstAppt = appts[0];
+        if (firstAppt && firstAppt.starts_at?.slice(0,10) < from) break;
       }
 
-      // Fetch active appointments in range
-      const activeBase = `appointments?sort=starts_at&order=asc&q[]=starts_at:>=${from} 00:00:00&q[]=starts_at:<=${to} 23:59:59`;
-      const activeAppts = await clinikoGetAll(activeBase, last => last.starts_at?.slice(0,10) <= to, 30);
-
-      // Fetch cancelled appointments in range separately (Cliniko filters these out by default)
-      const cancelBase = `appointments?sort=starts_at&order=asc&q[]=starts_at:>=${from} 00:00:00&q[]=starts_at:<=${to} 23:59:59&q[]=cancelled_at:>=2000-01-01`;
-      const cancelAppts = await clinikoGetAll(cancelBase, last => last.starts_at?.slice(0,10) <= to, 30);
-
-      // Merge — dedupe by id, cancelled record wins
-      const merged = {};
-      activeAppts.forEach(a => { merged[a.id] = a; });
-      cancelAppts.forEach(a => { merged[a.id] = a; }); // overwrites with cancelled version
-      const all = Object.values(merged);
-
-      return new Response(JSON.stringify({ appointments: all, total: all.length, active: activeAppts.length, cancelled: cancelAppts.length }), { headers: corsHeaders });
+      return new Response(JSON.stringify({ appointments: allAppts }), { headers: corsHeaders });
 
     // ── GET NEW PATIENTS IN DATE RANGE ───────────────
     } else if (action === 'get_new_patients') {
       const from = url.searchParams.get('from') || '';
-      const to   = url.searchParams.get('to')   || '';
-      if (!from || !to) {
-        return new Response(JSON.stringify({ error: 'from and to required' }), { status: 400, headers: corsHeaders });
+      const to = url.searchParams.get('to') || '';
+
+      let allPatients = [];
+      let page = 1;
+      let hasMore = true;
+
+      while (hasMore && page <= 10) {
+        const data = await clinikoGet(`patients?sort=created_at&order=desc&per_page=100&page=${page}`);
+        const patients = data.patients || [];
+        const filtered = patients.filter(p => {
+          const d = p.created_at?.slice(0,10);
+          return d >= from && d <= to;
+        });
+        allPatients = allPatients.concat(filtered);
+        const last = patients[patients.length - 1];
+        hasMore = !!data.links?.next && patients.length === 100 && (!last || last.created_at?.slice(0,10) >= from);
+        page++;
       }
 
-      const base = `patients?sort=created_at&order=desc&q[]=created_at:>=${from} 00:00:00&q[]=created_at:<=${to} 23:59:59`;
-      const patients = await clinikoGetAll(base, last => last.created_at?.slice(0,10) >= from, 10);
-      return new Response(JSON.stringify({ patients }), { headers: corsHeaders });
+      return new Response(JSON.stringify({ patients: allPatients }), { headers: corsHeaders });
 
-    // ── GET INVOICES IN DATE RANGE ───────────────────
+    // ── GET ALL INVOICES ─────────────────────────────
     } else if (action === 'get_invoices_range') {
       const from = url.searchParams.get('from') || '';
-      const to   = url.searchParams.get('to')   || '';
-      if (!from || !to) {
-        return new Response(JSON.stringify({ error: 'from and to required' }), { status: 400, headers: corsHeaders });
+      const to = url.searchParams.get('to') || '';
+
+      let allInvoices = [];
+      let page = 1;
+      let hasMore = true;
+
+      // Fetch all invoices sorted newest first
+      while (hasMore && page <= 50) {
+        const data = await clinikoGet(`invoices?sort=created_at&order=desc&per_page=100&page=${page}`);
+        const invoices = data.invoices || [];
+        const filtered = invoices.filter(i => {
+          const d = i.created_at?.slice(0,10);
+          return d >= from && d <= to;
+        });
+        allInvoices = allInvoices.concat(filtered);
+        const last = invoices[invoices.length - 1];
+        // Stop if we've gone past the start date
+        hasMore = !!data.links?.next && invoices.length === 100 && (!last || last.created_at?.slice(0,10) >= from);
+        page++;
       }
 
-      const base = `invoices?sort=created_at&order=desc&q[]=created_at:>=${from} 00:00:00&q[]=created_at:<=${to} 23:59:59`;
-      const invoices = await clinikoGetAll(base, last => last.created_at?.slice(0,10) >= from, 50);
-      return new Response(JSON.stringify({ invoices }), { headers: corsHeaders });
+      return new Response(JSON.stringify({ invoices: allInvoices }), { headers: corsHeaders });
 
     } else {
       return new Response(JSON.stringify({ error: 'Unknown action' }), { status: 400, headers: corsHeaders });

@@ -479,7 +479,17 @@
             <div style="margin-bottom:12px;"><label style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted2);display:block;margin-bottom:6px;">Goals</label><textarea id="tm-goals" rows="2" style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--white);outline:none;resize:vertical;" placeholder="Professional goals..."></textarea></div>
             <div style="margin-bottom:12px;"><label style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted2);display:block;margin-bottom:6px;">Currently Working On</label><textarea id="tm-working" rows="2" style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--white);outline:none;resize:vertical;" placeholder="Current focus/projects..."></textarea></div>
             <div style="margin-bottom:12px;"><label style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted2);display:block;margin-bottom:6px;">Certifications</label><input id="tm-certs" type="text" style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--white);outline:none;" placeholder="e.g. AEP, Dry Needling L1"></div>
-            <div style="margin-bottom:20px;"><label style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted2);display:block;margin-bottom:6px;">Mentoring Notes</label><textarea id="tm-mentoring" rows="3" style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--white);outline:none;resize:vertical;" placeholder="Session notes, progress, next steps..."></textarea></div>
+            <div style="margin-bottom:12px;"><label style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted2);display:block;margin-bottom:6px;">Mentoring Notes</label><textarea id="tm-mentoring" rows="3" style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--white);outline:none;resize:vertical;" placeholder="Session notes, progress, next steps..."></textarea></div>
+            <!-- Leave Section -->
+            <div style="border-top:1px solid var(--border);padding-top:16px;margin-bottom:16px;">
+              <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--sky);margin-bottom:12px;">Upcoming Leave</div>
+              <div id="tm-leave-list" style="margin-bottom:10px;"></div>
+              <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end;">
+                <div><label style="font-size:11px;color:var(--muted2);display:block;margin-bottom:4px;">From</label><input id="tm-leave-from" type="date" style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--white);outline:none;"></div>
+                <div><label style="font-size:11px;color:var(--muted2);display:block;margin-bottom:4px;">To</label><input id="tm-leave-to" type="date" style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;font-size:13px;font-family:'DM Sans',sans-serif;color:var(--white);outline:none;"></div>
+                <button onclick="addLeaveEntry()" style="background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:8px 14px;font-size:13px;color:var(--sky);cursor:pointer;white-space:nowrap;">+ Add</button>
+              </div>
+            </div>
             <div style="display:flex;gap:10px;">
               <button onclick="saveTeamMember()" style="flex:1;background:var(--sky);color:#0f0f0f;border:none;border-radius:8px;padding:11px;font-size:14px;font-family:'DM Sans',sans-serif;font-weight:500;cursor:pointer;">Save</button>
               <button onclick="closeTeamModal()" style="flex:1;background:transparent;color:var(--muted2);border:1px solid var(--border2);border-radius:8px;padding:11px;font-size:14px;font-family:'DM Sans',sans-serif;cursor:pointer;">Cancel</button>
@@ -637,121 +647,70 @@ async function loadDashboard() {
   const fromStr = fmtDate(dateFrom), toStr = fmtDate(dateTo);
 
   try {
+    // ── Supabase-backed: data is pre-joined and pre-cleaned by sync service ──
     showLoading('Fetching practitioners...');
-    const pracData = await apiGet('get_practitioners');
-    const pracLookup = pracData.practitioners || {};
+    const pracData   = await apiGet('get_practitioners');
+    // pracData.practitioners is still a lookup object for any legacy code paths
 
     showLoading('Fetching appointments...');
-    const apptData = await apiGet('get_appointments_range', { from: fromStr, to: toStr });
-    const rawAppts = apptData.appointments || [];
+    const apptData   = await apiGet('get_appointments_range', { from: fromStr, to: toStr });
+    // Data arrives pre-joined with patient_name, practitioner_name, _patId, status_clean
+    allAppointments  = (apptData.appointments || []);
 
-    // Fetch 90 days forward for rebooking check (start day AFTER period ends)
-    showLoading('Fetching future appointments...');
-    const dayAfter = fmtDate(new Date(new Date(toStr + 'T00:00:00').getTime() + 24*60*60*1000));
-    const futureTo = fmtDate(new Date(new Date(toStr + 'T00:00:00').getTime() + 90*24*60*60*1000));
+    // Fetch 90 days forward for rebooking check
+    showLoading('Checking upcoming appointments...');
+    const dayAfter   = fmtDate(new Date(new Date(toStr + 'T00:00:00').getTime() + 24*60*60*1000));
+    const futureTo   = fmtDate(new Date(new Date(toStr + 'T00:00:00').getTime() + 90*24*60*60*1000));
     const futureData = await apiGet('get_appointments_range', { from: dayAfter, to: futureTo });
-    const rawFuture = futureData.appointments || [];
-
-    // Debug — open browser console to see this
-    console.group('🔍 BEP Raw API');
-    console.log('Period appts:', rawAppts.length, '| Future appts:', rawFuture.length);
-    console.log('apptData top-level keys:', Object.keys(apptData));
-    if (rawAppts[0]) {
-      console.log('Sample appt keys:', Object.keys(rawAppts[0]));
-      console.log('Sample appt:', rawAppts[0]);
-      console.log('patient obj:', rawAppts[0].patient);
-    }
-    const inlineCancel = rawAppts.filter(a => a.cancelled_at);
-    console.log('Appts with cancelled_at in response:', inlineCancel.length);
-    if (inlineCancel[0]) console.log('Sample cancelled:', inlineCancel[0]);
-    else console.warn('⚠️ No cancelled_at found — worker may be filtering cancelled appts out');
-    console.groupEnd();
-
-    const extractPatId = (a) => {
-      // Try all known Cliniko patient link locations
-      const link = a.links?.patient || a.patient?.links?.self || '';
-      if (link) {
-        const id = link.split('/').pop();
-        if (id) return String(id);
-      }
-      // Also try direct patient.id
-      if (a.patient?.id) return String(a.patient.id);
-      return null;
-    };
-
-    const enrich = (a) => {
-      const pracId = (() => {
-        // Cliniko returns practitioner id in several places depending on API version
-        const link = a.practitioner?.links?.self || a.links?.practitioner || '';
-        if (link) return link.split('/').pop() || null;
-        // Also try direct practitioner.id field
-        if (a.practitioner?.id) return String(a.practitioner.id);
-        return null;
-      })();
-      const pracName = pracId ? (pracLookup[pracId] || null) : null;
-      // patient_name is a direct field on the appointment in this worker
-      const patientName = a.patient_name || null;
-      const patId = extractPatId(a);
-      const apptTypeName = a.appointment_type_name || a.appointment_type?.name || null;
-      // cancellation_time is the real field; cancelled_at may be null even when cancelled
-      const cancelled_at = a.cancelled_at || a.cancellation_time || null;
-      return { ...a, cancelled_at, practitioner_name: pracName, patient_name: patientName, _patId: patId, appointment_type_name: apptTypeName };
-    };
-
-    // Enrich all appointments
-    allAppointments = rawAppts.map(a => enrich(a));
-
-    // Future appointments keyed by patient ID for rebooking
     const futureByPatient = {};
-    rawFuture.forEach(a => {
-      if (a.cancelled_at || a.cancellation_time) return;
-      const patId = extractPatId(a);
-      if (!patId) return;
-      if (!futureByPatient[patId]) futureByPatient[patId] = [];
-      futureByPatient[patId].push(a);
+    (futureData.appointments || []).forEach(a => {
+      if (a.is_cancelled) return;
+      const pid = a._patId;
+      if (!pid) return;
+      if (!futureByPatient[pid]) futureByPatient[pid] = [];
+      futureByPatient[pid].push(a);
     });
     window._futureByPatient = futureByPatient;
 
-    // New patients: use the API result, cross-filter to those with an appointment this period
+    // New patients — already date-filtered by Supabase, no cross-filter needed
     showLoading('Fetching new patients...');
     const patientData = await apiGet('get_new_patients', { from: fromStr, to: toStr });
-    const apiNewPatients = patientData.patients || [];
-    const periodPatientIds = new Set(allAppointments.filter(a => !isCancelled(a)).map(a => a._patId).filter(Boolean));
-    // Debug: compare ID formats
-    const sampleApptLink = allAppointments[0]?.links;
-    const samplePatId = allAppointments[0]?._patId;
-    const sampleNewPatId = apiNewPatients[0]?.id;
-    console.log(`🔍 New patients: API=${apiNewPatients.length} | period patient IDs: ${periodPatientIds.size} | sample appt links:`, sampleApptLink, `| sample _patId: "${samplePatId}" | sample new patient id: "${sampleNewPatId}"`);
+    allNewPatients = (patientData.patients || []).map(p => ({
+      ...p,
+      id:              String(p.id),
+      full_name:       [p.first_name, p.last_name].filter(Boolean).join(' '),
+      referral_source: p.referral_source || null,
+    }));
 
-    // Cross-filter: only count new patients who had at least one appointment this period.
-    // If no patient IDs matched (ID format mismatch), fall back to all new patients in period.
-    const crossFiltered = apiNewPatients.filter(p => {
-      const pid = p.id ? String(p.id) : null;
-      return pid && periodPatientIds.has(pid);
-    });
-    allNewPatients = (crossFiltered.length > 0 ? crossFiltered : apiNewPatients)
-      .map(p => ({
-        ...p,
-        id: String(p.id),
-        full_name: [p.first_name, p.last_name].filter(Boolean).join(' '),
-        referral_source: p.referral_source || p.referred_by || null,
-      }));
-    console.log(`🔍 New patients after cross-filter: ${allNewPatients.length} (crossFiltered: ${crossFiltered.length}, fallback: ${crossFiltered.length === 0})`);
-
+    // Invoices — practitioner_id is a direct column now, enrich with name
     showLoading('Fetching invoices...');
-    const invoiceData = await apiGet('get_invoices_range', { from: fromStr, to: toStr });
-    // Build appointment ID → practitioner lookup for invoice matching
-    const apptIdToPrac = {};
-    allAppointments.forEach(a => { if (a.id) apptIdToPrac[String(a.id)] = a.practitioner_name; });
-    allInvoices = (invoiceData.invoices || []).map(inv => {
-      const apptId = String(inv.appointment?.links?.self?.split('/').pop() || inv.appointment_id || '');
-      const pracName = apptId ? (apptIdToPrac[apptId] || null) : null;
-      return { ...inv, practitioner_name: pracName };
-    });
+    const invoiceData  = await apiGet('get_invoices_range', { from: fromStr, to: toStr });
+    const pracLookup   = pracData.practitioners || {};
+    allInvoices = (invoiceData.invoices || []).map(inv => ({
+      ...inv,
+      practitioner_name: inv.practitioner_id ? (pracLookup[inv.practitioner_id] || null) : null,
+      amount: parseFloat(inv.total_amount) || 0,
+    }));
 
     showLoading('Building dashboard...');
     processAll(allAppointments, allNewPatients, allInvoices, fromStr, toStr);
-    document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'});
+
+    // Show last sync time from Supabase
+    try {
+      const syncData = await apiGet('get_sync_status');
+      const apptSync = (syncData.sync_state || []).find(s => s.entity === 'appointments');
+      if (apptSync?.last_synced_at) {
+        const syncDate = new Date(apptSync.last_synced_at);
+        const age = Math.round((Date.now() - syncDate) / 60000);
+        const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age/60)}h ago`;
+        document.getElementById('last-updated').textContent = `Synced ${ageStr}`;
+        document.getElementById('last-updated').title = syncDate.toLocaleString('en-AU');
+      } else {
+        document.getElementById('last-updated').textContent = 'Sync status unknown';
+      }
+    } catch(_) {
+      document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'});
+    }
   } catch(e) {
     showError('Could not load data: ' + e.message);
   } finally {
@@ -761,42 +720,43 @@ async function loadDashboard() {
 }
 
 // ── ATTENDANCE HELPERS ────────────────────────────
-// Cliniko: group/class appointments have attendees array or max_attendees > 1
+// Classes = appointment type contains 'class' or 'group' (case insensitive)
+// Supabase data doesn't carry max_attendees so we detect by name
 function isGroup(a) {
-  return (a.appointment_type?.max_attendees > 1) || (a.max_attendees > 1)
-      || (Array.isArray(a.attendees) && a.attendees.length > 0) || false;
+  const t = (a.appointment_type_name || a.appointment_type || '').toLowerCase();
+  return t.includes('class') || t.includes('group') || a.is_group === true;
 }
-// Attended: not DNA, not cancelled.
-// Cliniko does NOT reliably set patient_arrived — treat any non-cancelled, non-DNA appt as attended.
+// ── STATUS HELPERS — use pre-computed fields from Supabase ────
 function isAttended(a) {
-  if (a.did_not_arrive === true) return false;
-  if (a.cancelled_at || a.cancellation_time) return false;
+  if (a.is_cancelled === true || a.cancelled_at) return false;
+  if (a.is_dna === true || a.did_not_arrive === true) return false;
   return true;
 }
-// DNA: explicitly marked did_not_arrive
-function isDNA(a) { return a.did_not_arrive === true && !a.cancelled_at && !a.cancellation_time; }
-// Cancelled: has cancellation_time OR cancelled_at
-function isCancelled(a) { return !!(a.cancelled_at || a.cancellation_time); }
-// No more "pending" — every non-cancelled appt either attended or DNA
+function isDNA(a)       { return a.is_dna === true || (a.did_not_arrive === true && !a.is_cancelled && !a.cancelled_at); }
+function isCancelled(a) { return a.is_cancelled === true || !!a.cancelled_at; }
 
 // ── PROCESS ALL DATA ──────────────────────────────
 function processAll(appts, newPatients, invoices, fromStr, toStr) {
-  // Filter to date range (exclude cancelled from main counts)
   const nowISO = new Date().toISOString();
-  const active = appts.filter(a => !isCancelled(a));
-  const cancelled = appts.filter(isCancelled);
-  // Only count appointments that have already started (exclude future bookings in period)
-  // Cliniko's "total" counts past+present, not upcoming in range
+
+  // Separate classes from individual appointments
+  const indivAppts = appts.filter(a => !isGroup(a));
+  const classAppts = appts.filter(a => isGroup(a));
+
+  const active    = indivAppts.filter(a => !isCancelled(a));
+  const cancelled = indivAppts.filter(isCancelled);
+
+  // Only count past appointments (exclude future bookings in period)
   const pastActive = active.filter(a => a.starts_at <= nowISO);
-  const total = pastActive.length;
-  const attended = pastActive.filter(isAttended).length;
-  const dna = pastActive.filter(isDNA).length;
-  // No pending — every active appt is attended or DNA
-  const completed = attended + dna;
+  const total      = pastActive.length;
+  const attended   = pastActive.filter(isAttended).length;
+  const dna        = pastActive.filter(isDNA).length;
+  const completed  = attended + dna;
   const attendanceRate = completed > 0 ? Math.round((attended / completed) * 100) : 0;
-  // Cancellation rate = cancelled / (all booked = completed + cancelled)
+
+  // Cancellation rate = cancelled / (completed + cancelled)
   const totalBooked = completed + cancelled.length;
-  const cancelRate = totalBooked > 0 ? Math.round((cancelled.length / totalBooked) * 100) : 0;
+  const cancelRate  = totalBooked > 0 ? Math.round((cancelled.length / totalBooked) * 100) : 0;
 
   // ── DEBUG ──
   console.group('🔍 processAll breakdown');
@@ -805,7 +765,15 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   console.log(`Cancelled: ${cancelled.length}`);
   console.log(`Attended: ${attended}, DNA: ${dna}, Completed: ${completed}`);
   console.log(`Cancel rate: ${cancelRate}% (${cancelled.length} of ${totalBooked})`);
-  console.log(`New patients: ${newPatients.length}`);
+  // New patients = registered in period AND had at least one attended appointment
+  const periodPatIds = new Set(pastActive.filter(isAttended).map(a => a._patId).filter(Boolean));
+  const newPatientsFiltered = newPatients.filter(p => {
+    const pid = p.id ? String(p.id) : null;
+    return pid && periodPatIds.has(pid);
+  });
+  // Fall back to all registered if cross-filter gives 0 (ID mismatch edge case)
+  const newPatientsDisplay = newPatientsFiltered.length > 0 ? newPatientsFiltered : newPatients;
+  console.log(`New patients: ${newPatientsDisplay.length} (registered: ${newPatients.length}, cross-filtered: ${newPatientsFiltered.length})`);
   // Sample an active appt to check fields
   if (active[0]) {
     console.log('Sample active appt:', {
@@ -827,21 +795,26 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   // Note completion — % of attended that have notes
   const noteCompletion = attended > 0 ? Math.round((active.filter(a => isAttended(a) && a.treatment_note_status >= 90).length / attended) * 100) : 0;
 
-  // Unique patients who attended — use _patId which is reliably extracted
-  const attendedPatientIds = new Set(pastActive.filter(isAttended).map(a => a._patId).filter(Boolean));
+  // Unique patients who attended — _patId is a string from worker
+  const attendedPatientIds = new Set(
+    pastActive.filter(isAttended).map(a => a._patId).filter(Boolean)
+  );
   const avgVisits = attendedPatientIds.size > 0 ? (attended / attendedPatientIds.size).toFixed(1) : '0';
 
-  // Rebooking: attended patient has ANY future non-cancelled booking:
-  // 1. In the 90-day forward fetch (window._futureByPatient)
-  // 2. OR later in the same period (e.g. attended Mon, has booking Thu same week)
+  // Rebooking: patient has any future non-cancelled booking
   const futureByPatient = window._futureByPatient || {};
   const rebookedPatients = new Set();
-  Object.entries(futureByPatient).forEach(([patId, fa]) => { if (fa.length > 0) rebookedPatients.add(patId); });
-  active.filter(a => a.starts_at > nowISO && a._patId).forEach(a => rebookedPatients.add(a._patId));
+  // From 90-day future fetch
+  Object.entries(futureByPatient).forEach(([patId, fa]) => {
+    if (fa.some(a => !isCancelled(a))) rebookedPatients.add(String(patId));
+  });
+  // From upcoming appts still within the selected period
+  active.filter(a => a.starts_at > nowISO && a._patId).forEach(a => rebookedPatients.add(String(a._patId)));
+
   let rebookCount = 0;
-  attendedPatientIds.forEach(patId => { if (rebookedPatients.has(patId)) rebookCount++; });
+  attendedPatientIds.forEach(patId => { if (rebookedPatients.has(String(patId))) rebookCount++; });
   const rebookRate = attendedPatientIds.size > 0 ? Math.round((rebookCount / attendedPatientIds.size) * 100) : 0;
-  console.log(`🔍 Rebook: ${rebookCount}/${attendedPatientIds.size}=${rebookRate}% | 90d future patients:${Object.keys(futureByPatient).length} in-period future appts:${active.filter(a=>a.starts_at>nowISO).length}`);
+  console.log(`Rebook: ${rebookCount}/${attendedPatientIds.size}=${rebookRate}% | future patients: ${Object.keys(futureByPatient).length}`);
 
   // Revenue
   const totalRevenue = invoices.reduce((sum, inv) => sum + parseFloat(inv.total_amount || inv.amount || 0), 0);
@@ -853,7 +826,7 @@ function processAll(appts, newPatients, invoices, fromStr, toStr) {
   document.getElementById('stat-attendance-sub').textContent = `${attended} attended of ${completed} completed`;
   document.getElementById('stat-dna').textContent = dna;
   document.getElementById('stat-dna-sub').textContent = `${dna} did not arrive`;
-  document.getElementById('stat-new').textContent = newPatients.length;
+  document.getElementById('stat-new').textContent = newPatientsDisplay.length;
   document.getElementById('stat-cancel').textContent = cancelRate + '%';
   document.getElementById('stat-cancel-sub').textContent = `${cancelled.length} of ${totalBooked} booked`;
   document.getElementById('stat-notes').textContent = noteCompletion + '%';
@@ -1493,12 +1466,18 @@ function openAddTeamMember() {
   document.getElementById('team-modal-title').textContent = 'Add Team Member';
   document.getElementById('tm-id').value = '';
   ['name','role','birthday','emergency','firstaid','cpr','goals','working','certs','mentoring'].forEach(f => { document.getElementById('tm-'+f).value = ''; });
+  _editingLeave = [];
+  renderLeaveList();
   document.getElementById('team-modal').style.display = 'flex';
 }
+
+// ── LEAVE TRACKING ────────────────────────────────
+let _editingLeave = []; // temp leave array while modal is open
 
 function openEditTeamMember(id) {
   const m = getTeamMembers().find(t => t.id === id);
   if (!m) return;
+  _editingLeave = JSON.parse(JSON.stringify(m.leave || []));
   document.getElementById('team-modal-title').textContent = 'Edit — ' + m.name;
   document.getElementById('tm-id').value = id;
   document.getElementById('tm-name').value = m.name || '';
@@ -1511,11 +1490,42 @@ function openEditTeamMember(id) {
   document.getElementById('tm-working').value = m.working || '';
   document.getElementById('tm-certs').value = m.certs || '';
   document.getElementById('tm-mentoring').value = m.mentoring || '';
+  renderLeaveList();
   document.getElementById('team-modal').style.display = 'flex';
 }
 
 function closeTeamModal() {
   document.getElementById('team-modal').style.display = 'none';
+  _editingLeave = [];
+}
+
+function renderLeaveList() {
+  const el = document.getElementById('tm-leave-list');
+  if (!el) return;
+  if (!_editingLeave.length) { el.innerHTML = '<div style="font-size:12px;color:var(--muted);margin-bottom:8px;">No leave scheduled</div>'; return; }
+  el.innerHTML = _editingLeave.map((l, i) => `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;">
+      <span style="color:var(--text);">${l.from} → ${l.to}</span>
+      ${l.note ? `<span style="color:var(--muted);">${l.note}</span>` : ''}
+      <button onclick="removeLeave(${i})" style="background:transparent;border:none;color:var(--danger);cursor:pointer;font-size:14px;padding:0 4px;">×</button>
+    </div>`).join('');
+}
+
+function addLeaveEntry() {
+  const from = document.getElementById('tm-leave-from').value;
+  const to   = document.getElementById('tm-leave-to').value;
+  if (!from || !to) { alert('Please enter both from and to dates.'); return; }
+  if (from > to) { alert('From date must be before to date.'); return; }
+  _editingLeave.push({ from, to, note: '' });
+  _editingLeave.sort((a,b) => a.from.localeCompare(b.from));
+  document.getElementById('tm-leave-from').value = '';
+  document.getElementById('tm-leave-to').value = '';
+  renderLeaveList();
+}
+
+function removeLeave(idx) {
+  _editingLeave.splice(idx, 1);
+  renderLeaveList();
 }
 
 function saveTeamMember() {
@@ -1532,6 +1542,7 @@ function saveTeamMember() {
     working: document.getElementById('tm-working').value,
     certs: document.getElementById('tm-certs').value,
     mentoring: document.getElementById('tm-mentoring').value,
+    leave: JSON.parse(JSON.stringify(_editingLeave)),
   };
   let members = getTeamMembers();
   if (id) { members = members.map(m => m.id == id ? member : m); }
@@ -1590,6 +1601,20 @@ function renderTeam() {
       ${m.certs ? `<div style="font-size:12px;margin-bottom:8px;"><span style="color:var(--muted);">Certs: </span>${m.certs}</div>` : ''}
       ${m.goals ? `<div style="font-size:12px;margin-bottom:8px;"><span style="color:var(--muted);">Goals: </span>${m.goals}</div>` : ''}
       ${m.working ? `<div style="font-size:12px;margin-bottom:8px;"><span style="color:var(--muted);">Working on: </span>${m.working}</div>` : ''}
+      ${(() => {
+        const leaves = (m.leave || []).filter(l => new Date(l.to) >= now).sort((a,b) => a.from.localeCompare(b.from));
+        if (!leaves.length) return '';
+        return `<div style="margin-top:10px;padding:10px;background:rgba(251,191,36,0.06);border:1px solid rgba(251,191,36,0.2);border-radius:8px;">
+          <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--warning);margin-bottom:6px;">Upcoming Leave</div>
+          ${leaves.map(l => {
+            const fd = new Date(l.from+'T00:00:00').toLocaleDateString('en-AU',{day:'numeric',month:'short'});
+            const td = new Date(l.to+'T00:00:00').toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'});
+            const daysUntil = Math.ceil((new Date(l.from) - now) / (1000*60*60*24));
+            const badge = daysUntil <= 7 ? `<span style="font-size:10px;color:var(--warning);"> (in ${daysUntil}d)</span>` : '';
+            return `<div style="font-size:12px;color:var(--text);">${fd} — ${td}${badge}${l.note ? ` · <span style="color:var(--muted);">${l.note}</span>` : ''}</div>`;
+          }).join('')}
+        </div>`;
+      })()}
       ${m.mentoring ? `<details style="margin-top:8px;"><summary style="font-size:12px;color:var(--muted);cursor:pointer;list-style:none;">▸ Mentoring notes</summary><div style="margin-top:8px;padding:10px;background:var(--surface2);border-radius:8px;font-size:12px;color:var(--text);">${m.mentoring}</div></details>` : ''}
     </div>`;
   }).join('');

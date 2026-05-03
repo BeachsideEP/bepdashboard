@@ -875,7 +875,12 @@ function showApp() {
 if (token) showApp();
 
 // ── DATE RANGE ────────────────────────────────────
-function fmtDate(d) { return d.toISOString().slice(0,10); }
+function fmtDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
 function setRange(type, evt) {
   const now = new Date();
@@ -1320,15 +1325,23 @@ async function buildGrowthTab() {
     }
   } else if (_growthPeriod === 'quarter') {
     for (let i = _growthWindow - 1; i >= 0; i--) {
-      // Total quarters since year 0, go back i quarters from current quarter
       const currentQuarter = Math.floor(now.getMonth() / 3);
       const totalQ = now.getFullYear() * 4 + currentQuarter - i;
       const qYear = Math.floor(totalQ / 4);
       const qNum = ((totalQ % 4) + 4) % 4; // normalise to 0-3
+      const label = `Q${qNum + 1} ${qYear.toString().slice(2)}`;
+      // Store the 3 constituent months so revenue can be summed from monthly fetches
+      const months = [0, 1, 2].map(m => {
+        const d = new Date(qYear, qNum * 3 + m, 1);
+        return {
+          from: fmtDate(d),
+          to: fmtDate(new Date(d.getFullYear(), d.getMonth() + 1, 0))
+        };
+      });
+      // from/to span the full quarter (used for appointments/patients queries)
       const qStart = new Date(qYear, qNum * 3, 1);
       const qEnd = new Date(qYear, qNum * 3 + 3, 0);
-      const label = `Q${qNum + 1} ${qYear.toString().slice(2)}`;
-      periods.push({ from: fmtDate(qStart), to: fmtDate(qEnd), label });
+      periods.push({ from: fmtDate(qStart), to: fmtDate(qEnd), label, months });
     }
   } else {
     for (let i = _growthWindow - 1; i >= 0; i--) {
@@ -1358,10 +1371,16 @@ async function buildGrowthTab() {
   // Fetch data for all periods in parallel (batch via worker)
   const periodData = await Promise.all(periods.map(async p => {
     try {
+      // For quarters: fetch invoices month-by-month to avoid date boundary bugs
+      const invPromise = p.months
+        ? Promise.all(p.months.map(m => apiGet('get_invoices_range', { from: m.from, to: m.to })))
+            .then(results => ({ invoices: results.flatMap(r => r.invoices || []) }))
+        : apiGet('get_invoices_range', { from: p.from, to: p.to });
+
       const [apptRes, patRes, invRes] = await Promise.all([
         apiGet('get_appointments_range', { from: p.from, to: p.to }),
         apiGet('get_new_patients', { from: p.from, to: p.to }),
-        apiGet('get_invoices_range', { from: p.from, to: p.to }),
+        invPromise,
       ]);
 
       const nowISO = new Date().toISOString();

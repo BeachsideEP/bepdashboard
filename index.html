@@ -817,7 +817,7 @@
 const WORKER = 'https://bepdashboard.bking-aep.workers.dev';
 const LOGO_B64 = '';  // Will be set below
 
-let token = sessionStorage.getItem('bep_token') || null;
+let token = localStorage.getItem('bep_token') || null;
 let dateFrom = null, dateTo = null;
 let chartAppts = null, chartDna = null, chartPrac = null, chartRevenue = null;
 let allAppointments = [], allNewPatients = [], allInvoices = [];
@@ -852,7 +852,7 @@ async function doLogin() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Invalid credentials');
     token = data.token;
-    sessionStorage.setItem('bep_token', token);
+    localStorage.setItem('bep_token', token);
     showApp();
   } catch(e) {
     errEl.textContent = e.message; errEl.style.display = 'block';
@@ -860,7 +860,7 @@ async function doLogin() {
 }
 
 function doLogout() {
-  token = null; sessionStorage.removeItem('bep_token');
+  token = null; localStorage.removeItem('bep_token');
   document.getElementById('app').classList.remove('show');
   document.getElementById('login-wrap').style.display = 'flex';
   document.getElementById('login-password').value = '';

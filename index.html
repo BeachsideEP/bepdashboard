@@ -256,6 +256,10 @@
         <svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/><path d="M21 21v-2a4 4 0 0 0-3-3.87"/></svg>
         CRM
       </div>
+      <div class="nav-item" onclick="switchTab('nps', this)">
+        <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+        NPS Scores
+      </div>
     </div>
     <div class="sidebar-footer">
       <div style="font-size:11px; color:var(--muted); margin-bottom:10px;" id="last-updated">Not yet loaded</div>
@@ -715,8 +719,8 @@
               <div class="stat-card"><div class="stat-label">Due for Contact</div><div class="stat-value c-warning" id="ref-stat-due">—</div><div class="stat-sub">overdue or this week</div></div>
               <div class="stat-card"><div class="stat-label">Top Referrer</div><div class="stat-value c-sky" id="ref-stat-top" style="font-size:18px;margin-top:4px;">—</div><div class="stat-sub" id="ref-stat-top-count"></div></div>
             </div>
-            <div id="referrer-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;">
-              <div class="empty" style="grid-column:1/-1;padding:60px;">Click CRM in the sidebar to load.</div>
+            <div class="table-card" id="referrer-grid-wrapper">
+              <div style="overflow-x:auto;"><table id="referrer-table"><thead><tr><th>Name / Practice</th><th>Specialty</th><th>Referrals</th><th>Phone</th><th>Next Contact</th><th>Notes</th><th>Actions</th></tr></thead><tbody id="referrer-grid"><tr><td colspan="7" class="empty" style="padding:60px;">Click CRM in the sidebar to load.</td></tr></tbody></table></div>
             </div>
           </div>
           <!-- ── LEADS ── -->
@@ -813,6 +817,80 @@
   </div>
 </div>
 
+<!-- NPS TAB -->
+<div class="tab-content" id="tab-nps" style="padding:0;">
+  <div class="content">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
+      <div>
+        <div style="font-family:'Cormorant Garamond',serif;font-size:22px;color:var(--white);">Net Promoter Score</div>
+        <div style="font-size:12px;color:var(--muted2);margin-top:2px;">Live patient scores from your Score integration</div>
+      </div>
+      <button onclick="openNpsSettings()" style="background:transparent;color:var(--sky);border:1px solid var(--border2);border-radius:8px;padding:9px 16px;font-size:13px;font-family:'DM Sans',sans-serif;cursor:pointer;">⚙ Configure Webhook</button>
+    </div>
+    <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:24px;">
+      <div class="stat-card"><div class="stat-label">NPS Score</div><div class="stat-value c-sky" id="nps-score">—</div><div class="stat-sub">(-100 to +100)</div></div>
+      <div class="stat-card"><div class="stat-label">Promoters</div><div class="stat-value c-success" id="nps-promoters">—</div><div class="stat-sub">score 9–10</div></div>
+      <div class="stat-card"><div class="stat-label">Passives</div><div class="stat-value c-sky" id="nps-passives">—</div><div class="stat-sub">score 7–8</div></div>
+      <div class="stat-card"><div class="stat-label">Detractors</div><div class="stat-value c-danger" id="nps-detractors">—</div><div class="stat-sub">score 0–6</div></div>
+    </div>
+    <div class="chart-grid" style="margin-bottom:24px;">
+      <div class="chart-card">
+        <div class="chart-header"><div><div class="chart-title">Score Distribution</div><div class="chart-sub">Responses by score (0–10)</div></div></div>
+        <div style="height:220px;"><canvas id="nps-chart-dist"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-header"><div><div class="chart-title">NPS Over Time</div><div class="chart-sub">Rolling average</div></div></div>
+        <div style="height:220px;"><canvas id="nps-chart-trend"></canvas></div>
+      </div>
+    </div>
+    <div id="nps-empty-state" class="table-card" style="padding:40px;text-align:center;">
+      <div style="font-size:32px;margin-bottom:12px;">📊</div>
+      <div style="font-size:16px;color:var(--white);margin-bottom:8px;">No webhook configured yet</div>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:20px;max-width:460px;margin-left:auto;margin-right:auto;">
+        Score (by Jules) can push patient NPS data to this dashboard via a webhook URL.<br>
+        Click <strong style="color:var(--sky);">Configure Webhook</strong> above, copy the URL provided, and paste it into your Score settings under <em>Webhooks Configuration</em>.
+      </div>
+      <button onclick="openNpsSettings()" style="background:var(--sky);color:#0f0f0f;border:none;border-radius:8px;padding:11px 22px;font-size:13px;font-family:'DM Sans',sans-serif;font-weight:500;cursor:pointer;">Set Up Webhook →</button>
+    </div>
+    <div class="table-card" id="nps-responses-card" style="display:none;">
+      <div class="table-header">
+        <div class="table-title">Recent Responses</div>
+        <button onclick="clearNpsData()" style="font-size:11px;padding:4px 10px;border-radius:6px;background:transparent;border:1px solid rgba(248,113,113,0.3);color:var(--danger);cursor:pointer;font-family:'DM Sans',sans-serif;">Clear All</button>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Date</th><th>Patient</th><th>Score</th><th>Category</th><th>Comment</th></tr></thead>
+          <tbody id="nps-table-body"><tr><td colspan="5" class="empty">No responses yet</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- NPS Settings Modal -->
+<div id="nps-settings-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:300;align-items:center;justify-content:center;">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px;width:540px;max-width:95vw;">
+    <div style="font-family:'Cormorant Garamond',serif;font-size:22px;color:var(--white);margin-bottom:8px;">Webhook Configuration</div>
+    <div style="font-size:13px;color:var(--muted2);margin-bottom:24px;">Paste this URL into Score's Webhook URL field. Score will POST JSON to this address each time a patient submits their NPS rating.</div>
+    <div style="margin-bottom:20px;">
+      <label style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--sky);display:block;margin-bottom:6px;">Your Webhook Endpoint</label>
+      <div style="display:flex;gap:8px;">
+        <input id="nps-webhook-display" readonly type="text" value="" style="flex:1;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;font-family:'DM Mono',monospace;color:var(--muted2);outline:none;">
+        <button onclick="copyNpsWebhook()" style="background:var(--sky);color:#0f0f0f;border:none;border-radius:8px;padding:10px 16px;font-size:13px;font-family:'DM Sans',sans-serif;font-weight:500;cursor:pointer;" id="nps-copy-btn">Copy</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px;">This endpoint is auto-generated. Share it with Jules at Score to enable the integration.</div>
+    </div>
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:24px;">
+      <div style="font-size:12px;color:var(--sky);font-weight:500;margin-bottom:8px;">Expected JSON payload from Score:</div>
+      <pre style="font-size:11px;color:var(--muted2);margin:0;white-space:pre-wrap;">{ "score": 9, "first_name": "Jane", "last_name": "Smith", "email": "jane@example.com", "submitted_at": "2026-05-07T10:30:00Z", "comment": "Great service!" }</pre>
+    </div>
+    <div style="display:flex;justify-content:flex-end;">
+      <button onclick="closeNpsSettings()" style="background:transparent;border:1px solid var(--border2);color:var(--muted2);border-radius:8px;padding:10px 20px;font-size:13px;font-family:'DM Sans',sans-serif;cursor:pointer;">Close</button>
+    </div>
+  </div>
+</div>
+
+
 <script>
 const WORKER = 'https://bepdashboard.bking-aep.workers.dev';
 const LOGO_B64 = '';  // Will be set below
@@ -823,7 +901,7 @@ let chartAppts = null, chartDna = null, chartPrac = null, chartRevenue = null;
 let allAppointments = [], allNewPatients = [], allInvoices = [];
 
 // ── TAB SWITCHING ──────────────────────────────────
-const TAB_TITLES = { overview: 'Overview', practitioners: 'Practitioners', cancellations: 'Cancellations', revenue: 'Revenue', actions: 'Action Centre', timelost: 'Time Lost', team: 'Team', classes: 'Classes', referralhub: 'Referral Hub', growth: 'Clinic Growth', crm: 'CRM' };
+const TAB_TITLES = { overview: 'Overview', practitioners: 'Practitioners', cancellations: 'Cancellations', revenue: 'Revenue', actions: 'Action Centre', timelost: 'Time Lost', team: 'Team', classes: 'Classes', referralhub: 'Referral Hub', growth: 'Clinic Growth', crm: 'CRM', nps: 'NPS Scores' };
 function switchTab(name, el) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -833,6 +911,7 @@ function switchTab(name, el) {
   if (name === 'timelost') renderPracHoursEditor();
   if (name === 'growth' && token) buildGrowthTab();
   if (name === 'crm' && token) loadCRM();
+  if (name === 'nps') initNpsTab();
 }
 
 // ── AUTH ──────────────────────────────────────────
@@ -1729,7 +1808,7 @@ function buildReferralHub(periodPatients, allTimePatients, appts, invoices) {
         labels: catEntries.map(([k]) => k),
         datasets: [{ data: catEntries.map(([,v])=>v), backgroundColor: COLORS, borderWidth: 0 }]
       },
-      options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'right', labels:{ color:'#94a3b8', font:{ size:11 }, padding:12 } } } }
+      options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'right', labels:{ color:'#94a3b8', font:{ size:11 }, padding:12, generateLabels: function(chart) { const data = chart.data; const total = data.datasets[0].data.reduce(function(s,v){return s+v;}, 0); return data.labels.map(function(label, i) { const val = data.datasets[0].data[i]; const pct = total ? Math.round(val/total*100) : 0; return { text: label + ' (' + pct + '%)', fillStyle: data.datasets[0].backgroundColor[i], hidden: false, index: i }; }); } } }, tooltip: { callbacks: { label: function(ctx) { const total = ctx.dataset.data.reduce(function(s,v){return s+v;},0); const pct = total ? Math.round(ctx.parsed/total*100) : 0; return ctx.label + ': ' + ctx.parsed + ' (' + pct + '%)'; } } } } }
     });
   }
   // Source list
@@ -2595,7 +2674,7 @@ function renderReferrers() {
   document.getElementById('ref-stat-top-count').textContent = top ? `${top.referral_count||0} referrals` : '';
 
   if (!filtered.length) {
-    grid.innerHTML = '<div class="empty" style="grid-column:1/-1;padding:60px;">No referrers found. Click + Add Referrer to get started.</div>';
+    grid.innerHTML = '<tr><td colspan="7" class="empty">No referrers found. Click + Add Referrer to get started.</td></tr>';
     return;
   }
 
@@ -2603,41 +2682,21 @@ function renderReferrers() {
     const nextContact = r.next_contact_date;
     const isOverdue = nextContact && nextContact < today;
     const isDueSoon = nextContact && nextContact >= today && nextContact <= weekEndStr;
-    const contactBadge = isOverdue
-      ? `<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(248,113,113,0.1);color:var(--danger);border:1px solid rgba(248,113,113,0.2);">Overdue</span>`
+    const contactCell = isOverdue
+      ? '<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(248,113,113,0.1);color:var(--danger);border:1px solid rgba(248,113,113,0.2);">Overdue</span>'
       : isDueSoon
-      ? `<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(251,191,36,0.1);color:var(--warning);border:1px solid rgba(251,191,36,0.2);">Due Soon</span>`
-      : nextContact ? `<span style="font-size:11px;color:var(--muted);">${new Date(nextContact+'T00:00:00').toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'})}</span>` : '';
+      ? '<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:rgba(251,191,36,0.1);color:var(--warning);border:1px solid rgba(251,191,36,0.2);">Due Soon</span><br><span style="font-size:11px;color:var(--muted);">' + new Date(nextContact+'T00:00:00').toLocaleDateString('en-AU',{day:'numeric',month:'short'}) + '</span>'
+      : nextContact ? '<span style="font-size:12px;color:var(--muted2);">' + new Date(nextContact+'T00:00:00').toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'}) + '</span>' : '<span style="color:var(--muted);">—</span>';
 
-    return `<div style="background:var(--surface);border:1px solid ${isOverdue?'rgba(248,113,113,0.3)':isDueSoon?'rgba(251,191,36,0.3)':'var(--border)'};border-radius:14px;padding:20px;">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
-        <div>
-          <div style="font-weight:500;font-size:15px;color:var(--white);">${r.name}</div>
-          <div style="font-size:12px;color:var(--sky);margin-top:2px;">${r.specialty||''} ${r.practice ? '· '+r.practice : ''}</div>
-        </div>
-        <div style="display:flex;gap:6px;align-items:center;">
-          <span style="font-family:'DM Mono',monospace;font-size:18px;color:var(--sky);">${r.referral_count||0}</span>
-          <span style="font-size:10px;color:var(--muted);margin-top:2px;">refs</span>
-        </div>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;margin-bottom:12px;">
-        ${r.phone ? `<div><span style="color:var(--muted);">📞 </span><a href="tel:${r.phone}" style="color:var(--text);text-decoration:none;">${r.phone}</a></div>` : '<div></div>'}
-        ${r.email ? `<div><span style="color:var(--muted);">✉ </span><a href="mailto:${r.email}" style="color:var(--text);text-decoration:none;">${r.email}</a></div>` : '<div></div>'}
-        ${r.address ? `<div style="grid-column:1/-1;color:var(--muted2);">📍 ${r.address}</div>` : ''}
-      </div>
-      ${r.notes ? `<div style="font-size:12px;color:var(--muted2);margin-bottom:10px;padding:8px;background:var(--surface2);border-radius:6px;">${r.notes}</div>` : ''}
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
-        <div style="display:flex;gap:6px;align-items:center;">
-          ${r.last_contact_date ? `<span style="font-size:11px;color:var(--muted);">Last: ${new Date(r.last_contact_date+'T00:00:00').toLocaleDateString('en-AU',{day:'numeric',month:'short'})}</span>` : ''}
-          ${contactBadge}
-        </div>
-        <div style="display:flex;gap:6px;">
-          <button onclick="logReferrerContact('${r.id}')" style="font-size:11px;padding:4px 10px;border-radius:6px;background:var(--sky-dim);border:1px solid rgba(135,206,235,0.2);color:var(--sky);cursor:pointer;font-family:'DM Sans',sans-serif;">Log Contact</button>
-          <button onclick="openReferrerModal('${r.id}')" style="font-size:11px;padding:4px 10px;border-radius:6px;background:transparent;border:1px solid var(--border2);color:var(--muted2);cursor:pointer;font-family:'DM Sans',sans-serif;">Edit</button>
-          <button onclick="deleteReferrer('${r.id}')" style="font-size:11px;padding:4px 10px;border-radius:6px;background:transparent;border:1px solid rgba(248,113,113,0.2);color:var(--danger);cursor:pointer;font-family:'DM Sans',sans-serif;">Delete</button>
-        </div>
-      </div>
-    </div>`;
+    return '<tr>'
+      + '<td><div class="fw">' + r.name + '</div>' + (r.practice ? '<div style="font-size:11px;color:var(--muted2);">' + r.practice + '</div>' : '') + '</td>'
+      + '<td style="font-size:12px;color:var(--sky);">' + (r.specialty || '<span style="color:var(--muted);">—</span>') + '</td>'
+      + '<td><span style="font-family:DM Mono,monospace;color:var(--sky);">' + (r.referral_count||0) + '</span></td>'
+      + '<td style="font-size:12px;">' + (r.phone ? '<a href="tel:' + r.phone + '" style="color:var(--text);text-decoration:none;">' + r.phone + '</a>' : '<span style="color:var(--muted);">—</span>') + '</td>'
+      + '<td>' + contactCell + '</td>'
+      + '<td style="font-size:11px;color:var(--muted2);max-width:180px;white-space:normal;">' + (r.notes || '<span style="color:var(--muted);">—</span>') + '</td>'
+      + '<td><div style="display:flex;gap:4px;"><button onclick="logReferrerContact(' + "'" + r.id + "'" + ')" style="font-size:11px;padding:3px 8px;border-radius:6px;background:var(--sky-dim);border:1px solid rgba(135,206,235,0.2);color:var(--sky);cursor:pointer;font-family:DM Sans,sans-serif;">Log</button><button onclick="openReferrerModal(' + "'" + r.id + "'" + ')" style="font-size:11px;padding:3px 8px;border-radius:6px;background:transparent;border:1px solid var(--border2);color:var(--muted2);cursor:pointer;font-family:DM Sans,sans-serif;">Edit</button><button onclick="deleteReferrer(' + "'" + r.id + "'" + ')" style="font-size:11px;padding:3px 8px;border-radius:6px;background:transparent;border:1px solid rgba(248,113,113,0.2);color:var(--danger);cursor:pointer;font-family:DM Sans,sans-serif;">Del</button></div></td>'
+      + '</tr>';
   }).join('');
 }
 
@@ -2840,6 +2899,90 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('date-to').value = fmtDate(today);
   document.getElementById('date-from').value = fmtDate(new Date(today.getFullYear(), today.getMonth(), 1));
 });
+// ── NPS / NET PROMOTER SCORE ──────────────────────
+let _npsResponses = [];
+let npsChartDist = null, npsChartTrend = null;
+
+function getNpsWebhookUrl() {
+  let tok = localStorage.getItem('nps_webhook_token');
+  if (!tok) { tok = 'nps_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36); localStorage.setItem('nps_webhook_token', tok); }
+  return window.location.origin + window.location.pathname + '?nps_hook=' + tok;
+}
+
+function initNpsTab() {
+  try { _npsResponses = JSON.parse(localStorage.getItem('nps_responses') || '[]'); } catch(e) { _npsResponses = []; }
+  renderNpsDashboard();
+}
+
+function renderNpsDashboard() {
+  const data = _npsResponses;
+  const emptyState = document.getElementById('nps-empty-state');
+  const card = document.getElementById('nps-responses-card');
+  if (!data.length) {
+    emptyState.style.display = 'block'; card.style.display = 'none';
+    ['nps-score','nps-promoters','nps-passives','nps-detractors'].forEach(id => document.getElementById(id).textContent = '—');
+    return;
+  }
+  emptyState.style.display = 'none'; card.style.display = 'block';
+  const promoters = data.filter(r => r.score >= 9).length;
+  const passives  = data.filter(r => r.score >= 7 && r.score <= 8).length;
+  const detractors= data.filter(r => r.score <= 6).length;
+  const total = data.length;
+  const nps = Math.round(((promoters - detractors) / total) * 100);
+  document.getElementById('nps-score').textContent = (nps > 0 ? '+' : '') + nps;
+  document.getElementById('nps-promoters').textContent = promoters;
+  document.getElementById('nps-passives').textContent = passives;
+  document.getElementById('nps-detractors').textContent = detractors;
+
+  const dist = Array(11).fill(0);
+  data.forEach(r => { if (r.score >= 0 && r.score <= 10) dist[r.score]++; });
+  const colors = dist.map((_, i) => i >= 9 ? 'rgba(74,222,128,0.8)' : i >= 7 ? 'rgba(135,206,235,0.8)' : 'rgba(248,113,113,0.8)');
+  const distCtx = document.getElementById('nps-chart-dist').getContext('2d');
+  if (npsChartDist) npsChartDist.destroy();
+  npsChartDist = new Chart(distCtx, { type: 'bar', data: { labels: ['0','1','2','3','4','5','6','7','8','9','10'], datasets: [{ data: dist, backgroundColor: colors, borderRadius: 4 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#666' }, grid: { color: '#2a2a2a' } }, y: { ticks: { color: '#666', stepSize: 1 }, grid: { color: '#2a2a2a' } } } } });
+
+  const sorted = [...data].sort((a,b) => new Date(a.submitted_at) - new Date(b.submitted_at));
+  const groups = []; const grpSize = Math.max(1, Math.ceil(sorted.length / 8));
+  for (let i = 0; i < sorted.length; i += grpSize) {
+    const g = sorted.slice(i, i + grpSize);
+    const gP = g.filter(r => r.score >= 9).length, gD = g.filter(r => r.score <= 6).length;
+    groups.push(Math.round(((gP - gD) / g.length) * 100));
+  }
+  const trendCtx = document.getElementById('nps-chart-trend').getContext('2d');
+  if (npsChartTrend) npsChartTrend.destroy();
+  npsChartTrend = new Chart(trendCtx, { type: 'line', data: { labels: groups.map((_, i) => 'Batch ' + (i+1)), datasets: [{ label: 'NPS', data: groups, borderColor: '#87ceeb', backgroundColor: 'rgba(135,206,235,0.1)', fill: true, tension: 0.4, pointBackgroundColor: '#87ceeb' }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#666' }, grid: { color: '#2a2a2a' } }, y: { ticks: { color: '#666' }, grid: { color: '#2a2a2a' }, suggestedMin: -100, suggestedMax: 100 } } } });
+
+  const tbody = document.getElementById('nps-table-body');
+  const recent = [...data].sort((a,b) => new Date(b.submitted_at) - new Date(a.submitted_at)).slice(0, 50);
+  tbody.innerHTML = recent.map(r => {
+    const cat = r.score >= 9 ? '<span style="color:var(--success);font-size:11px;">Promoter</span>' : r.score >= 7 ? '<span style="color:var(--sky);font-size:11px;">Passive</span>' : '<span style="color:var(--danger);font-size:11px;">Detractor</span>';
+    const d = r.submitted_at ? new Date(r.submitted_at).toLocaleDateString('en-AU', {day:'numeric',month:'short',year:'2-digit'}) : '—';
+    const name = [r.first_name, r.last_name].filter(Boolean).join(' ') || r.email || 'Anonymous';
+    return '<tr><td style="font-size:12px;color:var(--muted2);">' + d + '</td><td><div class="fw">' + name + '</div>' + (r.email ? '<div style="font-size:11px;color:var(--muted);">' + r.email + '</div>' : '') + '</td><td><span style="font-family:DM Mono,monospace;font-size:16px;font-weight:500;color:var(--white);">' + r.score + '</span><span style="font-size:10px;color:var(--muted);">/10</span></td><td>' + cat + '</td><td style="font-size:12px;color:var(--muted2);max-width:240px;white-space:normal;">' + (r.comment || '<span style="color:var(--muted);">—</span>') + '</td></tr>';
+  }).join('');
+}
+
+function openNpsSettings() {
+  document.getElementById('nps-webhook-display').value = getNpsWebhookUrl();
+  document.getElementById('nps-settings-modal').style.display = 'flex';
+}
+function closeNpsSettings() { document.getElementById('nps-settings-modal').style.display = 'none'; }
+function copyNpsWebhook() {
+  navigator.clipboard.writeText(getNpsWebhookUrl()).then(() => {
+    const btn = document.getElementById('nps-copy-btn');
+    btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 2000);
+  });
+}
+function clearNpsData() {
+  if (!confirm('Delete all NPS responses? This cannot be undone.')) return;
+  _npsResponses = []; localStorage.removeItem('nps_responses'); renderNpsDashboard();
+}
+function addNpsResponse(payload) {
+  _npsResponses.push(payload);
+  localStorage.setItem('nps_responses', JSON.stringify(_npsResponses));
+  if (document.getElementById('tab-nps').classList.contains('active')) renderNpsDashboard();
+}
+
 </script>
 </body>
 </html>

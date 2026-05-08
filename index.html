@@ -2913,7 +2913,7 @@ function getNpsWebhookUrl() {
 function initNpsTab() {
   _npsResponses = [];
   renderNpsDashboard();
-  fetch(WORKER_URL + '?action=get_nps_responses', { headers: { 'Authorization': 'Bearer ' + token } })
+  fetch(WORKER + '?action=get_nps_responses', { headers: { 'Authorization': 'Bearer ' + token } })
     .then(r => r.json())
     .then(data => {
       if (data.responses) {

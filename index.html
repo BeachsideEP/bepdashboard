@@ -2911,8 +2911,23 @@ function getNpsWebhookUrl() {
 }
 
 function initNpsTab() {
-  try { _npsResponses = JSON.parse(localStorage.getItem('nps_responses') || '[]'); } catch(e) { _npsResponses = []; }
+  _npsResponses = [];
   renderNpsDashboard();
+  fetch(WORKER_URL + '?action=get_nps_responses', { headers: { 'Authorization': 'Bearer ' + token } })
+    .then(r => r.json())
+    .then(data => {
+      if (data.responses) {
+        _npsResponses = data.responses.map(r => ({
+          first_name:   r.first_name,
+          last_name:    r.last_name,
+          score:        r.score,
+          comment:      r.comment,
+          submitted_at: r.created_at,
+        }));
+        renderNpsDashboard();
+      }
+    })
+    .catch(e => console.error('NPS fetch error', e));
 }
 
 function renderNpsDashboard() {
@@ -2976,7 +2991,7 @@ function copyNpsWebhook() {
 }
 function clearNpsData() {
   if (!confirm('Delete all NPS responses? This cannot be undone.')) return;
-  _npsResponses = []; localStorage.removeItem('nps_responses'); renderNpsDashboard();
+  _npsResponses = []; renderNpsDashboard();
 }
 function addNpsResponse(payload) {
   _npsResponses.push(payload);
